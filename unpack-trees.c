@@ -1,5 +1,6 @@
 #define NO_THE_INDEX_COMPATIBILITY_MACROS
 #include "cache.h"
+#include "argv-array.h"
 #include "repository.h"
 #include "config.h"
 #include "dir.h"
@@ -14,6 +15,9 @@
 #include "dir.h"
 #include "submodule.h"
 #include "submodule-config.h"
+#include "fsmonitor.h"
+#include "object-store.h"
+#include "fetch-object.h"
 
 /*
  * Error messages expected by scripts out of plumbing commands such as
@@ -101,6 +105,8 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 	const char **msgs = opts->msgs;
 	const char *msg;
 
+	argv_array_init(&opts->msgs_to_free);
+
 	if (!strcmp(cmd, "checkout"))
 		msg = advice_commit_before_merge
 		      ? _("Your local changes to the following files would be overwritten by checkout:\n%%s"
@@ -117,7 +123,7 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 			  "Please commit your changes or stash them before you %s.")
 		      : _("Your local changes to the following files would be overwritten by %s:\n%%s");
 	msgs[ERROR_WOULD_OVERWRITE] = msgs[ERROR_NOT_UPTODATE_FILE] =
-		xstrfmt(msg, cmd, cmd);
+		argv_array_pushf(&opts->msgs_to_free, msg, cmd, cmd);
 
 	msgs[ERROR_NOT_UPTODATE_DIR] =
 		_("Updating the following directories would lose untracked files in them:\n%s");
@@ -137,7 +143,8 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 		      ? _("The following untracked working tree files would be removed by %s:\n%%s"
 			  "Please move or remove them before you %s.")
 		      : _("The following untracked working tree files would be removed by %s:\n%%s");
-	msgs[ERROR_WOULD_LOSE_UNTRACKED_REMOVED] = xstrfmt(msg, cmd, cmd);
+	msgs[ERROR_WOULD_LOSE_UNTRACKED_REMOVED] =
+		argv_array_pushf(&opts->msgs_to_free, msg, cmd, cmd);
 
 	if (!strcmp(cmd, "checkout"))
 		msg = advice_commit_before_merge
@@ -154,7 +161,8 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 		      ? _("The following untracked working tree files would be overwritten by %s:\n%%s"
 			  "Please move or remove them before you %s.")
 		      : _("The following untracked working tree files would be overwritten by %s:\n%%s");
-	msgs[ERROR_WOULD_LOSE_UNTRACKED_OVERWRITTEN] = xstrfmt(msg, cmd, cmd);
+	msgs[ERROR_WOULD_LOSE_UNTRACKED_OVERWRITTEN] =
+		argv_array_pushf(&opts->msgs_to_free, msg, cmd, cmd);
 
 	/*
 	 * Special case: ERROR_BIND_OVERLAP refers to a pair of paths, we
@@ -163,7 +171,7 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 	msgs[ERROR_BIND_OVERLAP] = _("Entry '%s' overlaps with '%s'.  Cannot bind.");
 
 	msgs[ERROR_SPARSE_NOT_UPTODATE_FILE] =
-		_("Cannot update sparse checkout: the following entries are not up-to-date:\n%s");
+		_("Cannot update sparse checkout: the following entries are not up to date:\n%s");
 	msgs[ERROR_WOULD_LOSE_ORPHANED_OVERWRITTEN] =
 		_("The following working tree files would be overwritten by sparse checkout update:\n%s");
 	msgs[ERROR_WOULD_LOSE_ORPHANED_REMOVED] =
@@ -175,6 +183,12 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 	/* rejected paths may not have a static buffer */
 	for (i = 0; i < ARRAY_SIZE(opts->unpack_rejects); i++)
 		opts->unpack_rejects[i].strdup_strings = 1;
+}
+
+void clear_unpack_trees_porcelain(struct unpack_trees_options *opts)
+{
+	argv_array_clear(&opts->msgs_to_free);
+	memset(opts->msgs, 0, sizeof(opts->msgs));
 }
 
 static int do_add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
@@ -193,10 +207,10 @@ static int do_add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
 static struct cache_entry *dup_entry(const struct cache_entry *ce)
 {
 	unsigned int size = ce_size(ce);
-	struct cache_entry *new = xmalloc(size);
+	struct cache_entry *new_entry = xmalloc(size);
 
-	memcpy(new, ce, size);
-	return new;
+	memcpy(new_entry, ce, size);
+	return new_entry;
 }
 
 static void add_entry(struct unpack_trees_options *o,
@@ -288,7 +302,7 @@ static void load_gitmodules_file(struct index_state *index,
 		if (!state && ce->ce_flags & CE_WT_REMOVE) {
 			repo_read_gitmodules(the_repository);
 		} else if (state && (ce->ce_flags & CE_UPDATE)) {
-			submodule_free();
+			submodule_free(the_repository);
 			checkout_entry(ce, state, NULL);
 			repo_read_gitmodules(the_repository);
 		}
@@ -369,12 +383,34 @@ static int check_updates(struct unpack_trees_options *o)
 		load_gitmodules_file(index, &state);
 
 	enable_delayed_checkout(&state);
+	if (repository_format_partial_clone && o->update && !o->dry_run) {
+		/*
+		 * Prefetch the objects that are to be checked out in the loop
+		 * below.
+		 */
+		struct oid_array to_fetch = OID_ARRAY_INIT;
+		int fetch_if_missing_store = fetch_if_missing;
+		fetch_if_missing = 0;
+		for (i = 0; i < index->cache_nr; i++) {
+			struct cache_entry *ce = index->cache[i];
+			if ((ce->ce_flags & CE_UPDATE) &&
+			    !S_ISGITLINK(ce->ce_mode)) {
+				if (!has_object_file(&ce->oid))
+					oid_array_append(&to_fetch, &ce->oid);
+			}
+		}
+		if (to_fetch.nr)
+			fetch_objects(repository_format_partial_clone,
+				      &to_fetch);
+		fetch_if_missing = fetch_if_missing_store;
+		oid_array_clear(&to_fetch);
+	}
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
 
 		if (ce->ce_flags & CE_UPDATE) {
 			if (ce->ce_flags & CE_WT_REMOVE)
-				die("BUG: both update and delete flags are set on %s",
+				BUG("both update and delete flags are set on %s",
 				    ce->name);
 			display_progress(progress, ++cnt);
 			ce->ce_flags &= ~CE_UPDATE;
@@ -383,8 +419,8 @@ static int check_updates(struct unpack_trees_options *o)
 			}
 		}
 	}
-	errs |= finish_delayed_checkout(&state);
 	stop_progress(&progress);
+	errs |= finish_delayed_checkout(&state);
 	if (o->update)
 		git_attr_set_direction(GIT_ATTR_CHECKIN, NULL);
 	return errs != 0;
@@ -408,6 +444,7 @@ static int apply_sparse_checkout(struct index_state *istate,
 		ce->ce_flags &= ~CE_SKIP_WORKTREE;
 	if (was_skip_worktree != ce_skip_worktree(ce)) {
 		ce->ce_flags |= CE_UPDATE_IN_BASE;
+		mark_fsmonitor_invalid(istate, ce);
 		istate->cache_changed |= CE_ENTRY_CHANGED;
 	}
 
@@ -1210,7 +1247,7 @@ static void mark_new_skip_worktree(struct exclude_list *el,
 		if (select_flag && !(ce->ce_flags & select_flag))
 			continue;
 
-		if (!ce_stage(ce))
+		if (!ce_stage(ce) && !(ce->ce_flags & CE_CONFLICTED))
 			ce->ce_flags |= skip_wt_flag;
 		else
 			ce->ce_flags &= ~skip_wt_flag;
@@ -1259,10 +1296,21 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 	o->result.timestamp.sec = o->src_index->timestamp.sec;
 	o->result.timestamp.nsec = o->src_index->timestamp.nsec;
 	o->result.version = o->src_index->version;
-	o->result.split_index = o->src_index->split_index;
-	if (o->result.split_index)
+	if (!o->src_index->split_index) {
+		o->result.split_index = NULL;
+	} else if (o->src_index == o->dst_index) {
+		/*
+		 * o->dst_index (and thus o->src_index) will be discarded
+		 * and overwritten with o->result at the end of this function,
+		 * so just use src_index's split_index to avoid having to
+		 * create a new one.
+		 */
+		o->result.split_index = o->src_index->split_index;
 		o->result.split_index->refcount++;
-	hashcpy(o->result.sha1, o->src_index->sha1);
+	} else {
+		o->result.split_index = init_split_index(&o->result);
+	}
+	oidcpy(&o->result.oid, &o->src_index->oid);
 	o->merge_size = len;
 	mark_all_ce_unused(o->src_index);
 
@@ -1376,7 +1424,6 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		}
 	}
 
-	o->src_index = NULL;
 	ret = check_updates(o) ? (-2) : 0;
 	if (o->dst_index) {
 		if (!ret) {
@@ -1387,12 +1434,13 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 						  WRITE_TREE_SILENT |
 						  WRITE_TREE_REPAIR);
 		}
-		move_index_extensions(&o->result, o->dst_index);
+		move_index_extensions(&o->result, o->src_index);
 		discard_index(o->dst_index);
 		*o->dst_index = o->result;
 	} else {
 		discard_index(&o->result);
 	}
+	o->src_index = NULL;
 
 done:
 	clear_exclude_list(&el);
@@ -1484,8 +1532,8 @@ static int verify_uptodate_1(const struct cache_entry *ce,
 		add_rejected_path(o, error_type, ce->name);
 }
 
-static int verify_uptodate(const struct cache_entry *ce,
-			   struct unpack_trees_options *o)
+int verify_uptodate(const struct cache_entry *ce,
+		    struct unpack_trees_options *o)
 {
 	if (!o->skip_sparse_checkout && (ce->ce_flags & CE_NEW_SKIP_WORKTREE))
 		return 0;
@@ -1504,7 +1552,7 @@ static void invalidate_ce_path(const struct cache_entry *ce,
 	if (!ce)
 		return;
 	cache_tree_invalidate_path(o->src_index, ce->name);
-	untracked_cache_invalidate_path(o->src_index, ce->name);
+	untracked_cache_invalidate_path(o->src_index, ce->name, 1);
 }
 
 /*
@@ -1541,15 +1589,15 @@ static int verify_clean_subdirectory(const struct cache_entry *ce,
 	int cnt = 0;
 
 	if (S_ISGITLINK(ce->ce_mode)) {
-		unsigned char sha1[20];
-		int sub_head = resolve_gitlink_ref(ce->name, "HEAD", sha1);
+		struct object_id oid;
+		int sub_head = resolve_gitlink_ref(ce->name, "HEAD", &oid);
 		/*
 		 * If we are not going to update the submodule, then
 		 * we don't care.
 		 */
-		if (!sub_head && !hashcmp(sha1, ce->oid.hash))
+		if (!sub_head && !oidcmp(&oid, &ce->oid))
 			return 0;
-		return verify_clean_submodule(sub_head ? NULL : sha1_to_hex(sha1),
+		return verify_clean_submodule(sub_head ? NULL : oid_to_hex(&oid),
 					      ce, error_type, o);
 	}
 
@@ -2137,6 +2185,9 @@ int oneway_merge(const struct cache_entry * const *src,
 			    ie_match_stat(o->src_index, old, &st, CE_MATCH_IGNORE_VALID|CE_MATCH_IGNORE_SKIP_WORKTREE))
 				update |= CE_UPDATE;
 		}
+		if (o->update && S_ISGITLINK(old->ce_mode) &&
+		    should_update_submodules() && !verify_uptodate(old, o))
+			update |= CE_UPDATE;
 		add_entry(o, old, update, 0);
 		return 0;
 	}

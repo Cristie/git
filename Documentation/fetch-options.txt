@@ -73,7 +73,22 @@ ifndef::git-pull[]
 	are fetched due to an explicit refspec (either on the command
 	line or in the remote configuration, for example if the remote
 	was cloned with the --mirror option), then they are also
-	subject to pruning.
+	subject to pruning. Supplying `--prune-tags` is a shorthand for
+	providing the tag refspec.
++
+See the PRUNING section below for more details.
+
+-P::
+--prune-tags::
+	Before fetching, remove any local tags that no longer exist on
+	the remote if `--prune` is enabled. This option should be used
+	more carefully, unlike `--prune` it will remove any local
+	references (local tags) that have been created. This option is
+	a shorthand for providing the explicit tag refspec along with
+	`--prune`, see the discussion about that in its documentation.
++
+See the PRUNING section below for more details.
+
 endif::git-pull[]
 
 ifndef::git-pull[]
@@ -172,6 +187,14 @@ endif::git-pull[]
 	by default when it is attached to a terminal, unless -q
 	is specified. This flag forces progress status even if the
 	standard error stream is not directed to a terminal.
+
+-o <option>::
+--server-option=<option>::
+	Transmit the given string to the server when communicating using
+	protocol version 2.  The given string must not contain a NUL or LF
+	character.
+	When multiple `--server-option=<option>` are given, they are all
+	sent to the other side in the order listed on the command line.
 
 -4::
 --ipv4::

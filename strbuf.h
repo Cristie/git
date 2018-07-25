@@ -1,6 +1,8 @@
 #ifndef STRBUF_H
 #define STRBUF_H
 
+struct string_list;
+
 /**
  * strbuf's are meant to be used with all the usual C string and memory
  * APIs. Given that the length of the buffer is known, it's often better to
@@ -70,6 +72,12 @@ struct strbuf {
 extern char strbuf_slopbuf[];
 #define STRBUF_INIT  { .alloc = 0, .len = 0, .buf = strbuf_slopbuf }
 
+/*
+ * Predeclare this here, since cache.h includes this file before it defines the
+ * struct.
+ */
+struct object_id;
+
 /**
  * Life Cycle Functions
  * --------------------
@@ -82,8 +90,12 @@ extern char strbuf_slopbuf[];
 extern void strbuf_init(struct strbuf *, size_t);
 
 /**
- * Release a string buffer and the memory it used. You should not use the
- * string buffer after using this function, unless you initialize it again.
+ * Release a string buffer and the memory it used. After this call, the
+ * strbuf points to an empty string that does not need to be free()ed, as
+ * if it had been set to `STRBUF_INIT` and never modified.
+ *
+ * To clear a strbuf in preparation for further use without the overhead
+ * of free()ing and malloc()ing again, use strbuf_reset() instead.
  */
 extern void strbuf_release(struct strbuf *);
 
@@ -91,6 +103,9 @@ extern void strbuf_release(struct strbuf *);
  * Detach the string from the strbuf and returns it; you now own the
  * storage the string occupies and it is your responsibility from then on
  * to release it with `free(3)` when you are done with it.
+ *
+ * The strbuf that previously held the string is reset to `STRBUF_INIT` so
+ * it can be reused after calling this function.
  */
 extern char *strbuf_detach(struct strbuf *, size_t *);
 
@@ -147,7 +162,10 @@ static inline void strbuf_setlen(struct strbuf *sb, size_t len)
 	if (len > (sb->alloc ? sb->alloc - 1 : 0))
 		die("BUG: strbuf_setlen() beyond buffer");
 	sb->len = len;
-	sb->buf[len] = '\0';
+	if (sb->buf != strbuf_slopbuf)
+		sb->buf[len] = '\0';
+	else
+		assert(!strbuf_slopbuf[0]);
 }
 
 /**
@@ -168,6 +186,9 @@ static inline void strbuf_setlen(struct strbuf *sb, size_t len)
 extern void strbuf_trim(struct strbuf *);
 extern void strbuf_rtrim(struct strbuf *);
 extern void strbuf_ltrim(struct strbuf *);
+
+/* Strip trailing directory separators */
+extern void strbuf_trim_trailing_dir_sep(struct strbuf *);
 
 /**
  * Replace the contents of the strbuf with a reencoded form.  Returns -1
@@ -470,15 +491,6 @@ extern int strbuf_normalize_path(struct strbuf *sb);
  */
 extern void strbuf_stripspace(struct strbuf *buf, int skip_comments);
 
-/**
- * Temporary alias until all topic branches have switched to use
- * strbuf_stripspace directly.
- */
-static inline void stripspace(struct strbuf *buf, int skip_comments)
-{
-	strbuf_stripspace(buf, skip_comments);
-}
-
 static inline int strbuf_strip_suffix(struct strbuf *sb, const char *suffix)
 {
 	if (strip_suffix_mem(sb->buf, &sb->len, suffix)) {
@@ -527,6 +539,20 @@ static inline struct strbuf **strbuf_split(const struct strbuf *sb,
 	return strbuf_split_max(sb, terminator, 0);
 }
 
+/*
+ * Adds all strings of a string list to the strbuf, separated by the given
+ * separator.  For example, if sep is
+ *   ', '
+ * and slist contains
+ *   ['element1', 'element2', ..., 'elementN'],
+ * then write:
+ *   'element1, element2, ..., elementN'
+ * to str.  If only one element, just write "element1" to str.
+ */
+extern void strbuf_add_separated_string_list(struct strbuf *str,
+					     const char *sep,
+					     struct string_list *slist);
+
 /**
  * Free a NULL-terminated list of strbufs (for example, the return
  * values of the strbuf_split*() functions).
@@ -538,7 +564,7 @@ extern void strbuf_list_free(struct strbuf **);
  * the strbuf `sb`.
  */
 extern void strbuf_add_unique_abbrev(struct strbuf *sb,
-				     const unsigned char *sha1,
+				     const struct object_id *oid,
 				     int abbrev_len);
 
 /**
@@ -606,6 +632,7 @@ __attribute__((format (printf,2,3)))
 extern int fprintf_ln(FILE *fp, const char *fmt, ...);
 
 char *xstrdup_tolower(const char *);
+char *xstrdup_toupper(const char *);
 
 /**
  * Create a newly allocated string using printf format. You can do this easily

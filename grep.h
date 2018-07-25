@@ -7,11 +7,12 @@
 #if PCRE_MAJOR >= 8 && PCRE_MINOR >= 32
 #ifndef NO_LIBPCRE1_JIT
 #define GIT_PCRE1_USE_JIT
+#define GIT_PCRE_STUDY_JIT_COMPILE PCRE_STUDY_JIT_COMPILE
 #endif
 #endif
 #endif
-#ifndef PCRE_STUDY_JIT_COMPILE
-#define PCRE_STUDY_JIT_COMPILE 0
+#ifndef GIT_PCRE_STUDY_JIT_COMPILE
+#define GIT_PCRE_STUDY_JIT_COMPILE 0
 #endif
 #if PCRE_MAJOR <= 8 && PCRE_MINOR < 20
 typedef int pcre_jit_stack;
@@ -59,6 +60,19 @@ enum grep_header_field {
 
 	/* Must be at the end of the enum */
 	GREP_HEADER_FIELD_MAX
+};
+
+enum grep_color {
+	GREP_COLOR_CONTEXT,
+	GREP_COLOR_FILENAME,
+	GREP_COLOR_FUNCTION,
+	GREP_COLOR_LINENO,
+	GREP_COLOR_COLUMNNO,
+	GREP_COLOR_MATCH_CONTEXT,
+	GREP_COLOR_MATCH_SELECTED,
+	GREP_COLOR_SELECTED,
+	GREP_COLOR_SEP,
+	NR_GREP_COLORS
 };
 
 struct grep_pat {
@@ -126,6 +140,7 @@ struct grep_opt {
 	int prefix_length;
 	regex_t regexp;
 	int linenum;
+	int columnnum;
 	int invert;
 	int ignore_case;
 	int status_only;
@@ -154,14 +169,7 @@ struct grep_opt {
 	int funcbody;
 	int extended_regexp_option;
 	int pattern_type_option;
-	char color_context[COLOR_MAXLEN];
-	char color_filename[COLOR_MAXLEN];
-	char color_function[COLOR_MAXLEN];
-	char color_lineno[COLOR_MAXLEN];
-	char color_match_context[COLOR_MAXLEN];
-	char color_match_selected[COLOR_MAXLEN];
-	char color_selected[COLOR_MAXLEN];
-	char color_sep[COLOR_MAXLEN];
+	char colors[NR_GREP_COLORS][COLOR_MAXLEN];
 	unsigned pre_context;
 	unsigned post_context;
 	unsigned last_shown;

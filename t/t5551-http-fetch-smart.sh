@@ -26,14 +26,14 @@ setup_askpass_helper
 cat >exp <<EOF
 > GET /smart/repo.git/info/refs?service=git-upload-pack HTTP/1.1
 > Accept: */*
-> Accept-Encoding: gzip
+> Accept-Encoding: ENCODINGS
 > Pragma: no-cache
 < HTTP/1.1 200 OK
 < Pragma: no-cache
 < Cache-Control: no-cache, max-age=0, must-revalidate
 < Content-Type: application/x-git-upload-pack-advertisement
 > POST /smart/repo.git/git-upload-pack HTTP/1.1
-> Accept-Encoding: gzip
+> Accept-Encoding: ENCODINGS
 > Content-Type: application/x-git-upload-pack-request
 > Accept: application/x-git-upload-pack-result
 > Content-Length: xxx
@@ -79,8 +79,13 @@ test_expect_success 'clone http repository' '
 		/^< Date: /d
 		/^< Content-Length: /d
 		/^< Transfer-Encoding: /d
-	" >act &&
-	test_cmp exp act
+	" >actual &&
+	sed -e "s/^> Accept-Encoding: .*/> Accept-Encoding: ENCODINGS/" \
+			actual >actual.smudged &&
+	test_cmp exp actual.smudged &&
+
+	grep "Accept-Encoding:.*gzip" actual >actual.gzip &&
+	test_line_count = 2 actual.gzip
 '
 
 test_expect_success 'fetch changes via http' '
@@ -362,6 +367,39 @@ test_expect_success 'custom http headers' '
 	git -c http.extraheader="x-magic-one: abra" \
 	    -c http.extraheader="x-magic-two: cadabra" \
 		submodule update sub
+'
+
+test_expect_success 'GIT_REDACT_COOKIES redacts cookies' '
+	rm -rf clone &&
+	echo "Set-Cookie: Foo=1" >cookies &&
+	echo "Set-Cookie: Bar=2" >>cookies &&
+	GIT_TRACE_CURL=true GIT_REDACT_COOKIES=Bar,Baz \
+		git -c "http.cookieFile=$(pwd)/cookies" clone \
+		$HTTPD_URL/smart/repo.git clone 2>err &&
+	grep "Cookie:.*Foo=1" err &&
+	grep "Cookie:.*Bar=<redacted>" err &&
+	! grep "Cookie:.*Bar=2" err
+'
+
+test_expect_success 'GIT_REDACT_COOKIES handles empty values' '
+	rm -rf clone &&
+	echo "Set-Cookie: Foo=" >cookies &&
+	GIT_TRACE_CURL=true GIT_REDACT_COOKIES=Foo \
+		git -c "http.cookieFile=$(pwd)/cookies" clone \
+		$HTTPD_URL/smart/repo.git clone 2>err &&
+	grep "Cookie:.*Foo=<redacted>" err
+'
+
+test_expect_success 'GIT_TRACE_CURL_NO_DATA prevents data from being traced' '
+	rm -rf clone &&
+	GIT_TRACE_CURL=true \
+		git clone $HTTPD_URL/smart/repo.git clone 2>err &&
+	grep "=> Send data" err &&
+
+	rm -rf clone &&
+	GIT_TRACE_CURL=true GIT_TRACE_CURL_NO_DATA=1 \
+		git clone $HTTPD_URL/smart/repo.git clone 2>err &&
+	! grep "=> Send data" err
 '
 
 stop_httpd

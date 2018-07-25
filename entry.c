@@ -1,8 +1,11 @@
 #include "cache.h"
 #include "blob.h"
+#include "object-store.h"
 #include "dir.h"
 #include "streaming.h"
 #include "submodule.h"
+#include "progress.h"
+#include "fsmonitor.h"
 
 static void create_directories(const char *path, int path_len,
 			       const struct checkout *state)
@@ -83,12 +86,12 @@ static int create_file(const char *path, unsigned int mode)
 static void *read_blob_entry(const struct cache_entry *ce, unsigned long *size)
 {
 	enum object_type type;
-	void *new = read_sha1_file(ce->oid.hash, &type, size);
+	void *blob_data = read_object_file(&ce->oid, &type, size);
 
-	if (new) {
+	if (blob_data) {
 		if (type == OBJ_BLOB)
-			return new;
-		free(new);
+			return blob_data;
+		free(blob_data);
 	}
 	return NULL;
 }
@@ -161,16 +164,22 @@ static int remove_available_paths(struct string_list_item *item, void *cb_data)
 int finish_delayed_checkout(struct checkout *state)
 {
 	int errs = 0;
+	unsigned delayed_object_count;
+	off_t filtered_bytes = 0;
 	struct string_list_item *filter, *path;
+	struct progress *progress;
 	struct delayed_checkout *dco = state->delayed_checkout;
 
 	if (!state->delayed_checkout)
 		return errs;
 
 	dco->state = CE_RETRY;
+	delayed_object_count = dco->paths.nr;
+	progress = start_delayed_progress(_("Filtering content"), delayed_object_count);
 	while (dco->filters.nr > 0) {
 		for_each_string_list_item(filter, &dco->filters) {
 			struct string_list available_paths = STRING_LIST_INIT_NODUP;
+			display_progress(progress, delayed_object_count - dco->paths.nr);
 
 			if (!async_query_available_blobs(filter->string, &available_paths)) {
 				/* Filter reported an error */
@@ -216,11 +225,17 @@ int finish_delayed_checkout(struct checkout *state)
 				}
 				ce = index_file_exists(state->istate, path->string,
 						       strlen(path->string), 0);
-				errs |= (ce ? checkout_entry(ce, state, NULL) : 1);
+				if (ce) {
+					errs |= checkout_entry(ce, state, NULL);
+					filtered_bytes += ce->ce_stat_data.sd_size;
+					display_throughput(progress, filtered_bytes);
+				} else
+					errs = 1;
 			}
 		}
 		string_list_remove_empty_items(&dco->filters, 0);
 	}
+	stop_progress(&progress);
 	string_list_clear(&dco->filters, 0);
 
 	/* At this point we should not have any delayed paths anymore. */
@@ -240,17 +255,19 @@ static int write_entry(struct cache_entry *ce,
 		       char *path, const struct checkout *state, int to_tempfile)
 {
 	unsigned int ce_mode_s_ifmt = ce->ce_mode & S_IFMT;
+	struct delayed_checkout *dco = state->delayed_checkout;
 	int fd, ret, fstat_done = 0;
-	char *new;
+	char *new_blob;
 	struct strbuf buf = STRBUF_INIT;
 	unsigned long size;
-	size_t wrote, newsize = 0;
+	ssize_t wrote;
+	size_t newsize = 0;
 	struct stat st;
 	const struct submodule *sub;
 
 	if (ce_mode_s_ifmt == S_IFREG) {
 		struct stream_filter *filter = get_stream_filter(ce->name,
-								 ce->oid.hash);
+								 &ce->oid);
 		if (filter &&
 		    !streaming_write_entry(ce, path, filter,
 					   state, to_tempfile,
@@ -259,69 +276,80 @@ static int write_entry(struct cache_entry *ce,
 	}
 
 	switch (ce_mode_s_ifmt) {
-	case S_IFREG:
 	case S_IFLNK:
-		new = read_blob_entry(ce, &size);
-		if (!new)
+		new_blob = read_blob_entry(ce, &size);
+		if (!new_blob)
 			return error("unable to read sha1 file of %s (%s)",
-				path, oid_to_hex(&ce->oid));
+				     path, oid_to_hex(&ce->oid));
 
-		if (ce_mode_s_ifmt == S_IFLNK && has_symlinks && !to_tempfile) {
-			ret = symlink(new, path);
-			free(new);
-			if (ret)
-				return error_errno("unable to create symlink %s",
-						   path);
-			break;
+		/*
+		 * We can't make a real symlink; write out a regular file entry
+		 * with the symlink destination as its contents.
+		 */
+		if (!has_symlinks || to_tempfile)
+			goto write_file_entry;
+
+		ret = symlink(new_blob, path);
+		free(new_blob);
+		if (ret)
+			return error_errno("unable to create symlink %s", path);
+		break;
+
+	case S_IFREG:
+		/*
+		 * We do not send the blob in case of a retry, so do not
+		 * bother reading it at all.
+		 */
+		if (dco && dco->state == CE_RETRY) {
+			new_blob = NULL;
+			size = 0;
+		} else {
+			new_blob = read_blob_entry(ce, &size);
+			if (!new_blob)
+				return error("unable to read sha1 file of %s (%s)",
+					     path, oid_to_hex(&ce->oid));
 		}
 
 		/*
 		 * Convert from git internal format to working tree format
 		 */
-		if (ce_mode_s_ifmt == S_IFREG) {
-			struct delayed_checkout *dco = state->delayed_checkout;
-			if (dco && dco->state != CE_NO_DELAY) {
-				/* Do not send the blob in case of a retry. */
-				if (dco->state == CE_RETRY) {
-					new = NULL;
-					size = 0;
-				}
-				ret = async_convert_to_working_tree(
-					ce->name, new, size, &buf, dco);
-				if (ret && string_list_has_string(&dco->paths, ce->name)) {
-					free(new);
-					goto finish;
-				}
-			} else
-				ret = convert_to_working_tree(
-					ce->name, new, size, &buf);
-
-			if (ret) {
-				free(new);
-				new = strbuf_detach(&buf, &newsize);
-				size = newsize;
+		if (dco && dco->state != CE_NO_DELAY) {
+			ret = async_convert_to_working_tree(ce->name, new_blob,
+							    size, &buf, dco);
+			if (ret && string_list_has_string(&dco->paths, ce->name)) {
+				free(new_blob);
+				goto delayed;
 			}
-			/*
-			 * No "else" here as errors from convert are OK at this
-			 * point. If the error would have been fatal (e.g.
-			 * filter is required), then we would have died already.
-			 */
-		}
+		} else
+			ret = convert_to_working_tree(ce->name, new_blob, size, &buf);
 
+		if (ret) {
+			free(new_blob);
+			new_blob = strbuf_detach(&buf, &newsize);
+			size = newsize;
+		}
+		/*
+		 * No "else" here as errors from convert are OK at this
+		 * point. If the error would have been fatal (e.g.
+		 * filter is required), then we would have died already.
+		 */
+
+	write_file_entry:
 		fd = open_output_fd(path, ce, to_tempfile);
 		if (fd < 0) {
-			free(new);
+			free(new_blob);
 			return error_errno("unable to create file %s", path);
 		}
 
-		wrote = write_in_full(fd, new, size);
+		wrote = write_in_full(fd, new_blob, size);
 		if (!to_tempfile)
 			fstat_done = fstat_output(fd, state, &st);
 		close(fd);
-		free(new);
-		if (wrote != size)
+		free(new_blob);
+		if (wrote < 0)
 			return error("unable to write file %s", path);
 		break;
+
 	case S_IFGITLINK:
 		if (to_tempfile)
 			return error("cannot create temporary submodule %s", path);
@@ -333,6 +361,7 @@ static int write_entry(struct cache_entry *ce,
 				NULL, oid_to_hex(&ce->oid),
 				state->force ? SUBMODULE_MOVE_HEAD_FORCE : 0);
 		break;
+
 	default:
 		return error("unknown file mode for %s in index", path);
 	}
@@ -341,11 +370,15 @@ finish:
 	if (state->refresh_cache) {
 		assert(state->istate);
 		if (!fstat_done)
-			lstat(ce->name, &st);
+			if (lstat(ce->name, &st) < 0)
+				return error_errno("unable to stat just-written file %s",
+						   ce->name);
 		fill_stat_cache_info(ce, &st);
 		ce->ce_flags |= CE_UPDATE_IN_BASE;
+		mark_fsmonitor_invalid(state->istate, ce);
 		state->istate->cache_changed |= CE_ENTRY_CHANGED;
 	}
+delayed:
 	return 0;
 }
 

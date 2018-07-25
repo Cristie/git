@@ -39,6 +39,10 @@ A few rules for repo setup:
 11. When user's cwd is outside worktree, cwd remains unchanged,
     prefix is NULL.
 "
+
+# This test heavily relies on the standard error of nested function calls.
+test_untraceable=UnfortunatelyYes
+
 . ./test-lib.sh
 
 here=$(pwd)
@@ -234,7 +238,6 @@ test_expect_success '#0: nonbare repo, no explicit configuration' '
 '
 
 test_expect_success '#1: GIT_WORK_TREE without explicit GIT_DIR is accepted' '
-	mkdir -p wt &&
 	try_repo 1 "$here" unset unset "" unset \
 		"$here/1/.git" "$here" "$here" 1/ \
 		"$here/1/.git" "$here" "$here" 1/sub/ 2>message &&

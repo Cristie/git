@@ -18,7 +18,7 @@ test_create_repo_with_commit () {
 }
 
 sanitize_output () {
-	sed -e "s/$_x40/HASH/" -e "s/$_x40/HASH/" output >output2 &&
+	sed -e "s/$OID_REGEX/HASH/" -e "s/$OID_REGEX/HASH/" output >output2 &&
 	mv output2 output
 }
 
@@ -306,7 +306,7 @@ test_expect_success 'diff with merge conflict in .gitmodules' '
 		cd super &&
 		git diff >../diff_actual 2>&1
 	) &&
-	test_cmp diff_actual diff_expect
+	test_cmp diff_expect diff_actual
 '
 
 test_expect_success 'diff --submodule with merge conflict in .gitmodules' '
@@ -314,7 +314,7 @@ test_expect_success 'diff --submodule with merge conflict in .gitmodules' '
 		cd super &&
 		git diff --submodule >../diff_submodule_actual 2>&1
 	) &&
-	test_cmp diff_submodule_actual diff_submodule_expect
+	test_cmp diff_submodule_expect diff_submodule_actual
 '
 
 # We'll setup different cases for further testing:

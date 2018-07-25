@@ -234,7 +234,7 @@ test_expect_success TTY 'push --no-progress silences progress but not status' '
 	test_commit no-progress &&
 	test_terminal git push --no-progress >output 2>&1 &&
 	test_i18ngrep "^To http" output &&
-	test_i18ngrep ! "^Writing objects"
+	test_i18ngrep ! "^Writing objects" output
 '
 
 test_expect_success 'push --progress shows progress to non-tty' '
@@ -375,6 +375,18 @@ test_expect_success 'push status output scrubs password' '
 		+HEAD:scrub >status &&
 	# should have been scrubbed down to vanilla URL
 	grep "^To $HTTPD_URL/smart/test_repo.git" status
+'
+
+test_expect_success 'colorize errors/hints' '
+	cd "$ROOT_PATH"/test_repo_clone &&
+	test_must_fail git -c color.transport=always -c color.advice=always \
+		-c color.push=always \
+		push origin origin/master^:master 2>act &&
+	test_decode_color <act >decoded &&
+	test_i18ngrep "<RED>.*rejected.*<RESET>" decoded &&
+	test_i18ngrep "<RED>error: failed to push some refs" decoded &&
+	test_i18ngrep "<YELLOW>hint: " decoded &&
+	test_i18ngrep ! "^hint: " decoded
 '
 
 stop_httpd

@@ -18,12 +18,12 @@ int read_link_extension(struct index_state *istate,
 	struct split_index *si;
 	int ret;
 
-	if (sz < 20)
+	if (sz < the_hash_algo->rawsz)
 		return error("corrupt link extension (too short)");
 	si = init_split_index(istate);
-	hashcpy(si->base_sha1, data);
-	data += 20;
-	sz -= 20;
+	hashcpy(si->base_oid.hash, data);
+	data += the_hash_algo->rawsz;
+	sz -= the_hash_algo->rawsz;
 	if (!sz)
 		return 0;
 	si->delete_bitmap = ewah_new();
@@ -45,7 +45,7 @@ int write_link_extension(struct strbuf *sb,
 			 struct index_state *istate)
 {
 	struct split_index *si = istate->split_index;
-	strbuf_add(sb, si->base_sha1, 20);
+	strbuf_add(sb, si->base_oid.hash, the_hash_algo->rawsz);
 	if (!si->delete_bitmap && !si->replace_bitmap)
 		return 0;
 	ewah_serialize_strbuf(si->delete_bitmap, sb);
@@ -238,6 +238,8 @@ void prepare_to_write_split_index(struct index_state *istate)
 				ALLOC_GROW(entries, nr_entries+1, nr_alloc);
 				entries[nr_entries++] = ce;
 			}
+			if (is_null_oid(&ce->oid))
+				istate->drop_cache_tree = 1;
 		}
 	}
 
@@ -303,17 +305,17 @@ void save_or_free_index_entry(struct index_state *istate, struct cache_entry *ce
 }
 
 void replace_index_entry_in_base(struct index_state *istate,
-				 struct cache_entry *old,
-				 struct cache_entry *new)
+				 struct cache_entry *old_entry,
+				 struct cache_entry *new_entry)
 {
-	if (old->index &&
+	if (old_entry->index &&
 	    istate->split_index &&
 	    istate->split_index->base &&
-	    old->index <= istate->split_index->base->cache_nr) {
-		new->index = old->index;
-		if (old != istate->split_index->base->cache[new->index - 1])
-			free(istate->split_index->base->cache[new->index - 1]);
-		istate->split_index->base->cache[new->index - 1] = new;
+	    old_entry->index <= istate->split_index->base->cache_nr) {
+		new_entry->index = old_entry->index;
+		if (old_entry != istate->split_index->base->cache[new_entry->index - 1])
+			free(istate->split_index->base->cache[new_entry->index - 1]);
+		istate->split_index->base->cache[new_entry->index - 1] = new_entry;
 	}
 }
 

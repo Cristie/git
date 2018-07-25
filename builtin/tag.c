@@ -10,6 +10,7 @@
 #include "config.h"
 #include "builtin.h"
 #include "refs.h"
+#include "object-store.h"
 #include "tag.h"
 #include "run-command.h"
 #include "parse-options.h"
@@ -82,7 +83,7 @@ static int for_each_tag_name(const char **argv, each_tag_name_fn fn,
 	for (p = argv; *p; p++) {
 		strbuf_reset(&ref);
 		strbuf_addf(&ref, "refs/tags/%s", *p);
-		if (read_ref(ref.buf, oid.hash)) {
+		if (read_ref(ref.buf, &oid)) {
 			error(_("tag '%s' not found."), *p);
 			had_error = 1;
 			continue;
@@ -97,9 +98,10 @@ static int for_each_tag_name(const char **argv, each_tag_name_fn fn,
 static int delete_tag(const char *name, const char *ref,
 		      const struct object_id *oid, const void *cb_data)
 {
-	if (delete_ref(NULL, ref, oid->hash, 0))
+	if (delete_ref(NULL, ref, oid, 0))
 		return 1;
-	printf(_("Deleted tag '%s' (was %s)\n"), name, find_unique_abbrev(oid->hash, DEFAULT_ABBREV));
+	printf(_("Deleted tag '%s' (was %s)\n"), name,
+	       find_unique_abbrev(oid, DEFAULT_ABBREV));
 	return 0;
 }
 
@@ -117,7 +119,7 @@ static int verify_tag(const char *name, const char *ref,
 		return -1;
 
 	if (format->format)
-		pretty_print_ref(name, oid->hash, format);
+		pretty_print_ref(name, oid, format);
 
 	return 0;
 }
@@ -158,7 +160,7 @@ static int git_tag_config(const char *var, const char *value, void *cb)
 
 	if (starts_with(var, "column."))
 		return git_column_config(var, value, "tag", &colopts);
-	return git_default_config(var, value, cb);
+	return git_color_default_config(var, value, cb);
 }
 
 static void write_tag_body(int fd, const struct object_id *oid)
@@ -167,7 +169,7 @@ static void write_tag_body(int fd, const struct object_id *oid)
 	enum object_type type;
 	char *buf, *sp;
 
-	buf = read_sha1_file(oid->hash, &type, &size);
+	buf = read_object_file(oid, &type, &size);
 	if (!buf)
 		return;
 	/* skip header */
@@ -187,13 +189,14 @@ static int build_tag_object(struct strbuf *buf, int sign, struct object_id *resu
 {
 	if (sign && do_sign(buf) < 0)
 		return error(_("unable to sign the tag"));
-	if (write_sha1_file(buf->buf, buf->len, tag_type, result->hash) < 0)
+	if (write_object_file(buf->buf, buf->len, tag_type, result) < 0)
 		return error(_("unable to write tag file"));
 	return 0;
 }
 
 struct create_tag_options {
 	unsigned int message_given:1;
+	unsigned int use_editor:1;
 	unsigned int sign;
 	enum {
 		CLEANUP_NONE,
@@ -210,7 +213,7 @@ static void create_tag(const struct object_id *object, const char *tag,
 	struct strbuf header = STRBUF_INIT;
 	char *path = NULL;
 
-	type = sha1_object_info(object->hash, NULL);
+	type = oid_object_info(the_repository, object, NULL);
 	if (type <= OBJ_NONE)
 	    die(_("bad object type."));
 
@@ -220,11 +223,11 @@ static void create_tag(const struct object_id *object, const char *tag,
 		    "tag %s\n"
 		    "tagger %s\n\n",
 		    oid_to_hex(object),
-		    typename(type),
+		    type_name(type),
 		    tag,
 		    git_committer_info(IDENT_STRICT));
 
-	if (!opt->message_given) {
+	if (!opt->message_given || opt->use_editor) {
 		int fd;
 
 		/* write the template message before editing: */
@@ -233,7 +236,10 @@ static void create_tag(const struct object_id *object, const char *tag,
 		if (fd < 0)
 			die_errno(_("could not create file '%s'"), path);
 
-		if (!is_null_oid(prev)) {
+		if (opt->message_given) {
+			write_or_die(fd, buf->buf, buf->len);
+			strbuf_reset(buf);
+		} else if (!is_null_oid(prev)) {
 			write_tag_body(fd, prev);
 		} else {
 			struct strbuf buf = STRBUF_INIT;
@@ -289,17 +295,17 @@ static void create_reflog_msg(const struct object_id *oid, struct strbuf *sb)
 		strbuf_addstr(sb, rla);
 	} else {
 		strbuf_addstr(sb, "tag: tagging ");
-		strbuf_add_unique_abbrev(sb, oid->hash, DEFAULT_ABBREV);
+		strbuf_add_unique_abbrev(sb, oid, DEFAULT_ABBREV);
 	}
 
 	strbuf_addstr(sb, " (");
-	type = sha1_object_info(oid->hash, NULL);
+	type = oid_object_info(the_repository, oid, NULL);
 	switch (type) {
 	default:
 		strbuf_addstr(sb, "object of unknown type");
 		break;
 	case OBJ_COMMIT:
-		if ((buf = read_sha1_file(oid->hash, &type, &size)) != NULL) {
+		if ((buf = read_object_file(oid, &type, &size)) != NULL) {
 			subject_len = find_commit_subject(buf, &subject_start);
 			strbuf_insert(sb, sb->len, subject_start, subject_len);
 		} else {
@@ -372,6 +378,7 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 	static struct ref_sorting *sorting = NULL, **sorting_tail = &sorting;
 	struct ref_format format = REF_FORMAT_INIT;
 	int icase = 0;
+	int edit_flag = 0;
 	struct option options[] = {
 		OPT_CMDMODE('l', "list", &cmdmode, N_("list tag names"), 'l'),
 		{ OPTION_INTEGER, 'n', NULL, &filter.lines, N_("n"),
@@ -386,12 +393,13 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 		OPT_CALLBACK('m', "message", &msg, N_("message"),
 			     N_("tag message"), parse_msg_arg),
 		OPT_FILENAME('F', "file", &msgfile, N_("read message from file")),
+		OPT_BOOL('e', "edit", &edit_flag, N_("force edit of tag message")),
 		OPT_BOOL('s', "sign", &opt.sign, N_("annotated and GPG-signed tag")),
 		OPT_STRING(0, "cleanup", &cleanup_arg, N_("mode"),
 			N_("how to strip spaces and #comments from message")),
 		OPT_STRING('u', "local-user", &keyid, N_("key-id"),
 					N_("use another key to sign the tag")),
-		OPT__FORCE(&force, N_("replace the tag if exists")),
+		OPT__FORCE(&force, N_("replace the tag if exists"), 0),
 		OPT_BOOL(0, "create-reflog", &create_reflog, N_("create a reflog")),
 
 		OPT_GROUP(N_("Tag listing options")),
@@ -411,6 +419,7 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 		},
 		OPT_STRING(  0 , "format", &format.format, N_("format"),
 			   N_("format to use for the output")),
+		OPT__COLOR(&format.use_color, N_("respect format colors")),
 		OPT_BOOL('i', "ignore-case", &icase, N_("sorting and filtering are case insensitive")),
 		OPT_END()
 	};
@@ -517,12 +526,13 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 	if (strbuf_check_tag_ref(&ref, tag))
 		die(_("'%s' is not a valid tag name."), tag);
 
-	if (read_ref(ref.buf, prev.hash))
+	if (read_ref(ref.buf, &prev))
 		oidclr(&prev);
 	else if (!force)
 		die(_("tag '%s' already exists"), tag);
 
 	opt.message_given = msg.given || msgfile;
+	opt.use_editor = edit_flag;
 
 	if (!cleanup_arg || !strcmp(cleanup_arg, "strip"))
 		opt.cleanup_mode = CLEANUP_ALL;
@@ -543,18 +553,20 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 
 	transaction = ref_transaction_begin(&err);
 	if (!transaction ||
-	    ref_transaction_update(transaction, ref.buf, object.hash, prev.hash,
+	    ref_transaction_update(transaction, ref.buf, &object, &prev,
 				   create_reflog ? REF_FORCE_CREATE_REFLOG : 0,
 				   reflog_msg.buf, &err) ||
 	    ref_transaction_commit(transaction, &err))
 		die("%s", err.buf);
 	ref_transaction_free(transaction);
 	if (force && !is_null_oid(&prev) && oidcmp(&prev, &object))
-		printf(_("Updated tag '%s' (was %s)\n"), tag, find_unique_abbrev(prev.hash, DEFAULT_ABBREV));
+		printf(_("Updated tag '%s' (was %s)\n"), tag,
+		       find_unique_abbrev(&prev, DEFAULT_ABBREV));
 
-	strbuf_release(&err);
-	strbuf_release(&buf);
-	strbuf_release(&ref);
-	strbuf_release(&reflog_msg);
+	UNLEAK(buf);
+	UNLEAK(ref);
+	UNLEAK(reflog_msg);
+	UNLEAK(msg);
+	UNLEAK(err);
 	return 0;
 }

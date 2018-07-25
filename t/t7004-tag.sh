@@ -363,7 +363,7 @@ test_expect_success 'tag -l <pattern> -l <pattern> works, as our buggy documenta
 '
 
 test_expect_success 'listing tags in column' '
-	COLUMNS=40 git tag -l --column=row >actual &&
+	COLUMNS=41 git tag -l --column=row >actual &&
 	cat >expected <<\EOF &&
 a1      aa1     cba     t210    t211
 v0.2.1  v1.0    v1.0.1  v1.1.3
@@ -452,6 +452,21 @@ test_expect_success \
 	test_cmp expect actual
 '
 
+get_tag_header annotated-tag-edit $commit commit $time >expect
+echo "An edited message" >>expect
+test_expect_success 'set up editor' '
+	write_script fakeeditor <<-\EOF
+	sed -e "s/A message/An edited message/g" <"$1" >"$1-"
+	mv "$1-" "$1"
+	EOF
+'
+test_expect_success \
+	'creating an annotated tag with -m message --edit should succeed' '
+	GIT_EDITOR=./fakeeditor git tag -m "A message" --edit annotated-tag-edit &&
+	get_tag_msg annotated-tag-edit >actual &&
+	test_cmp expect actual
+'
+
 cat >msgfile <<EOF
 Another message
 in a file.
@@ -462,6 +477,21 @@ test_expect_success \
 	'creating an annotated tag with -F messagefile should succeed' '
 	git tag -F msgfile file-annotated-tag &&
 	get_tag_msg file-annotated-tag >actual &&
+	test_cmp expect actual
+'
+
+get_tag_header file-annotated-tag-edit $commit commit $time >expect
+sed -e "s/Another message/Another edited message/g" msgfile >>expect
+test_expect_success 'set up editor' '
+	write_script fakeeditor <<-\EOF
+	sed -e "s/Another message/Another edited message/g" <"$1" >"$1-"
+	mv "$1-" "$1"
+	EOF
+'
+test_expect_success \
+	'creating an annotated tag with -F messagefile --edit should succeed' '
+	GIT_EDITOR=./fakeeditor git tag -F msgfile --edit file-annotated-tag-edit &&
+	get_tag_msg file-annotated-tag-edit >actual &&
 	test_cmp expect actual
 '
 
@@ -1026,7 +1056,18 @@ test_expect_success GPG \
 	git tag -s -F sigblanknonlfile blanknonlfile-signed-tag &&
 	get_tag_msg blanknonlfile-signed-tag >actual &&
 	test_cmp expect actual &&
-	git tag -v signed-tag
+	git tag -v blanknonlfile-signed-tag
+'
+
+test_expect_success GPG 'signed tag with embedded PGP message' '
+	cat >msg <<-\EOF &&
+	-----BEGIN PGP MESSAGE-----
+
+	this is not a real PGP message
+	-----END PGP MESSAGE-----
+	EOF
+	git tag -s -F msg confusing-pgp-message &&
+	git tag -v confusing-pgp-message
 '
 
 # messages with commented lines for signed tags:
@@ -1863,13 +1904,6 @@ test_expect_success 'version sort with very long prerelease suffix' '
 	git tag -l --sort=version:refname
 '
 
-run_with_limited_stack () {
-	(ulimit -s 128 && "$@")
-}
-
-test_lazy_prereq ULIMIT_STACK_SIZE 'run_with_limited_stack true'
-
-# we require ulimit, this excludes Windows
 test_expect_success ULIMIT_STACK_SIZE '--contains and --no-contains work in a deep repo' '
 	>expect &&
 	i=1 &&
@@ -1914,7 +1948,13 @@ test_expect_success '%(color) omitted without tty' '
 '
 
 test_expect_success TTY '%(color) present with tty' '
-	test_terminal env TERM=vt100 git tag $color_args >actual.raw &&
+	test_terminal git tag $color_args >actual.raw &&
+	test_decode_color <actual.raw >actual &&
+	test_cmp expect.color actual
+'
+
+test_expect_success '--color overrides auto-color' '
+	git tag --color $color_args >actual.raw &&
 	test_decode_color <actual.raw >actual &&
 	test_cmp expect.color actual
 '

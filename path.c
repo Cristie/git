@@ -10,6 +10,7 @@
 #include "submodule-config.h"
 #include "path.h"
 #include "packfile.h"
+#include "object-store.h"
 
 static int get_st_mode_bits(const char *path, int *mode)
 {
@@ -34,11 +35,10 @@ static struct strbuf *get_pathname(void)
 	return sb;
 }
 
-static char *cleanup_path(char *path)
+static const char *cleanup_path(const char *path)
 {
 	/* Clean it up */
-	if (!memcmp(path, "./", 2)) {
-		path += 2;
+	if (skip_prefix(path, "./", &path)) {
 		while (*path == '/')
 			path++;
 	}
@@ -47,7 +47,7 @@ static char *cleanup_path(char *path)
 
 static void strbuf_cleanup_path(struct strbuf *sb)
 {
-	char *path = cleanup_path(sb->buf);
+	const char *path = cleanup_path(sb->buf);
 	if (path > sb->buf)
 		strbuf_remove(sb, 0, path - sb->buf);
 }
@@ -64,7 +64,7 @@ char *mksnpath(char *buf, size_t n, const char *fmt, ...)
 		strlcpy(buf, bad_path, n);
 		return buf;
 	}
-	return cleanup_path(buf);
+	return (char *)cleanup_path(buf);
 }
 
 static int dir_prefix(const char *buf, const char *dir)
@@ -193,7 +193,7 @@ static void *add_to_trie(struct trie *root, const char *key, void *value)
 		 * Split this node: child will contain this node's
 		 * existing children.
 		 */
-		child = malloc(sizeof(*child));
+		child = xmalloc(sizeof(*child));
 		memcpy(child->children, root->children, sizeof(root->children));
 
 		child->len = root->len - i - 1;
@@ -383,7 +383,7 @@ static void adjust_git_path(const struct repository *repo,
 		strbuf_splice(buf, 0, buf->len,
 			      repo->index_file, strlen(repo->index_file));
 	else if (dir_prefix(base, "objects"))
-		replace_dir(buf, git_dir_len + 7, repo->objectdir);
+		replace_dir(buf, git_dir_len + 7, repo->objects->objectdir);
 	else if (git_hooks_path && dir_prefix(base, "hooks"))
 		replace_dir(buf, git_dir_len + 5, git_hooks_path);
 	else if (repo->different_commondir)
@@ -637,8 +637,9 @@ void strbuf_git_common_path(struct strbuf *sb,
 int validate_headref(const char *path)
 {
 	struct stat st;
-	char *buf, buffer[256];
-	unsigned char sha1[20];
+	char buffer[256];
+	const char *refname;
+	struct object_id oid;
 	int fd;
 	ssize_t len;
 
@@ -662,24 +663,24 @@ int validate_headref(const char *path)
 	len = read_in_full(fd, buffer, sizeof(buffer)-1);
 	close(fd);
 
+	if (len < 0)
+		return -1;
+	buffer[len] = '\0';
+
 	/*
 	 * Is it a symbolic ref?
 	 */
-	if (len < 4)
-		return -1;
-	if (!memcmp("ref:", buffer, 4)) {
-		buf = buffer + 4;
-		len -= 4;
-		while (len && isspace(*buf))
-			buf++, len--;
-		if (len >= 5 && !memcmp("refs/", buf, 5))
+	if (skip_prefix(buffer, "ref:", &refname)) {
+		while (isspace(*refname))
+			refname++;
+		if (starts_with(refname, "refs/"))
 			return 0;
 	}
 
 	/*
 	 * Is this a detached HEAD?
 	 */
-	if (!get_sha1_hex(buffer, sha1))
+	if (!get_oid_hex(buffer, &oid))
 		return 0;
 
 	return -1;
@@ -717,7 +718,7 @@ char *expand_user_path(const char *path, int real_home)
 			if (!home)
 				goto return_null;
 			if (real_home)
-				strbuf_addstr(&user_path, real_path(home));
+				strbuf_add_real_path(&user_path, home);
 			else
 				strbuf_addstr(&user_path, home);
 #ifdef GIT_WINDOWS_NATIVE
@@ -1305,7 +1306,7 @@ static int only_spaces_and_periods(const char *path, size_t len, size_t skip)
 
 int is_ntfs_dotgit(const char *name)
 {
-	int len;
+	size_t len;
 
 	for (len = 0; ; len++)
 		if (!name[len] || name[len] == '\\' || is_dir_sep(name[len])) {
@@ -1320,6 +1321,90 @@ int is_ntfs_dotgit(const char *name)
 			name += len + 1;
 			len = -1;
 		}
+}
+
+static int is_ntfs_dot_generic(const char *name,
+			       const char *dotgit_name,
+			       size_t len,
+			       const char *dotgit_ntfs_shortname_prefix)
+{
+	int saw_tilde;
+	size_t i;
+
+	if ((name[0] == '.' && !strncasecmp(name + 1, dotgit_name, len))) {
+		i = len + 1;
+only_spaces_and_periods:
+		for (;;) {
+			char c = name[i++];
+			if (!c)
+				return 1;
+			if (c != ' ' && c != '.')
+				return 0;
+		}
+	}
+
+	/*
+	 * Is it a regular NTFS short name, i.e. shortened to 6 characters,
+	 * followed by ~1, ... ~4?
+	 */
+	if (!strncasecmp(name, dotgit_name, 6) && name[6] == '~' &&
+	    name[7] >= '1' && name[7] <= '4') {
+		i = 8;
+		goto only_spaces_and_periods;
+	}
+
+	/*
+	 * Is it a fall-back NTFS short name (for details, see
+	 * https://en.wikipedia.org/wiki/8.3_filename?
+	 */
+	for (i = 0, saw_tilde = 0; i < 8; i++)
+		if (name[i] == '\0')
+			return 0;
+		else if (saw_tilde) {
+			if (name[i] < '0' || name[i] > '9')
+				return 0;
+		} else if (name[i] == '~') {
+			if (name[++i] < '1' || name[i] > '9')
+				return 0;
+			saw_tilde = 1;
+		} else if (i >= 6)
+			return 0;
+		else if (name[i] < 0) {
+			/*
+			 * We know our needles contain only ASCII, so we clamp
+			 * here to make the results of tolower() sane.
+			 */
+			return 0;
+		} else if (tolower(name[i]) != dotgit_ntfs_shortname_prefix[i])
+			return 0;
+
+	goto only_spaces_and_periods;
+}
+
+/*
+ * Inline helper to make sure compiler resolves strlen() on literals at
+ * compile time.
+ */
+static inline int is_ntfs_dot_str(const char *name, const char *dotgit_name,
+				  const char *dotgit_ntfs_shortname_prefix)
+{
+	return is_ntfs_dot_generic(name, dotgit_name, strlen(dotgit_name),
+				   dotgit_ntfs_shortname_prefix);
+}
+
+int is_ntfs_dotgitmodules(const char *name)
+{
+	return is_ntfs_dot_str(name, "gitmodules", "gi7eba");
+}
+
+int is_ntfs_dotgitignore(const char *name)
+{
+	return is_ntfs_dot_str(name, "gitignore", "gi250a");
+}
+
+int is_ntfs_dotgitattributes(const char *name)
+{
+	return is_ntfs_dot_str(name, "gitattributes", "gi7d29");
 }
 
 int looks_like_command_line_option(const char *str)
@@ -1357,12 +1442,12 @@ char *xdg_cache_home(const char *filename)
 	return NULL;
 }
 
-GIT_PATH_FUNC(git_path_cherry_pick_head, "CHERRY_PICK_HEAD")
-GIT_PATH_FUNC(git_path_revert_head, "REVERT_HEAD")
-GIT_PATH_FUNC(git_path_squash_msg, "SQUASH_MSG")
-GIT_PATH_FUNC(git_path_merge_msg, "MERGE_MSG")
-GIT_PATH_FUNC(git_path_merge_rr, "MERGE_RR")
-GIT_PATH_FUNC(git_path_merge_mode, "MERGE_MODE")
-GIT_PATH_FUNC(git_path_merge_head, "MERGE_HEAD")
-GIT_PATH_FUNC(git_path_fetch_head, "FETCH_HEAD")
-GIT_PATH_FUNC(git_path_shallow, "shallow")
+REPO_GIT_PATH_FUNC(cherry_pick_head, "CHERRY_PICK_HEAD")
+REPO_GIT_PATH_FUNC(revert_head, "REVERT_HEAD")
+REPO_GIT_PATH_FUNC(squash_msg, "SQUASH_MSG")
+REPO_GIT_PATH_FUNC(merge_msg, "MERGE_MSG")
+REPO_GIT_PATH_FUNC(merge_rr, "MERGE_RR")
+REPO_GIT_PATH_FUNC(merge_mode, "MERGE_MODE")
+REPO_GIT_PATH_FUNC(merge_head, "MERGE_HEAD")
+REPO_GIT_PATH_FUNC(fetch_head, "FETCH_HEAD")
+REPO_GIT_PATH_FUNC(shallow, "shallow")

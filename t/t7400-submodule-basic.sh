@@ -126,6 +126,24 @@ test_expect_success 'submodule add' '
 	test_cmp empty untracked
 '
 
+test_expect_success 'setup parent and one repository' '
+	test_create_repo parent &&
+	test_commit -C parent one
+'
+
+test_expect_success 'redirected submodule add does not show progress' '
+	git -C addtest submodule add "file://$submodurl/parent" submod-redirected \
+		2>err &&
+	! grep % err &&
+	test_i18ngrep ! "Checking connectivity" err
+'
+
+test_expect_success 'redirected submodule add --progress does show progress' '
+	git -C addtest submodule add --progress "file://$submodurl/parent" \
+		submod-redirected-progress 2>err && \
+	grep % err
+'
+
 test_expect_success 'submodule add to .gitignored path fails' '
 	(
 		cd addtest-ignore &&
@@ -821,6 +839,21 @@ test_expect_success 'moving the superproject does not break submodules' '
 	)
 '
 
+test_expect_success 'moving the submodule does not break the superproject' '
+	(
+		cd addtest2 &&
+		git submodule status
+	) >actual &&
+	sed -e "s/^ \([^ ]* repo\) .*/-\1/" <actual >expect &&
+	mv addtest2/repo addtest2/repo.bak &&
+	test_when_finished "mv addtest2/repo.bak addtest2/repo" &&
+	(
+		cd addtest2 &&
+		git submodule status
+	) >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'submodule add --name allows to replace a submodule with another at the same path' '
 	(
 		cd addtest2 &&
@@ -958,6 +991,11 @@ test_expect_success 'submodule deinit should remove the whole submodule section 
 	test -n "$(git config --get-regexp "submodule\.example2\.")" &&
 	test -f example2/.git &&
 	rmdir init
+'
+
+test_expect_success 'submodule deinit should unset core.worktree' '
+	test_path_is_file .git/modules/example/config &&
+	test_must_fail git config -f .git/modules/example/config core.worktree
 '
 
 test_expect_success 'submodule deinit from subdirectory' '
@@ -1211,7 +1249,7 @@ test_expect_success 'clone --recurse-submodules with a pathspec works' '
 
 	git clone --recurse-submodules="sub0" multisuper multisuper_clone &&
 	git -C multisuper_clone submodule status |cut -c1,43- >actual &&
-	test_cmp actual expected
+	test_cmp expected actual
 '
 
 test_expect_success 'clone with multiple --recurse-submodules options' '

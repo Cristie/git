@@ -10,7 +10,7 @@ static uint32_t take2(const unsigned char *sha1)
  * Conventional binary search loop looks like this:
  *
  *      do {
- *              int mi = (lo + hi) / 2;
+ *              int mi = lo + (hi - lo) / 2;
  *              int cmp = "entry pointed at by mi" minus "target";
  *              if (!cmp)
  *                      return (mi is the wanted one)
@@ -81,7 +81,7 @@ int sha1_pos(const unsigned char *sha1, void *table, size_t nr,
 				mi = (nr - 1) * (miv - lov) / (hiv - lov);
 				if (lo <= mi && mi < hi)
 					break;
-				die("BUG: assertion failed in binary search");
+				BUG("assertion failed in binary search");
 			}
 		}
 	}
@@ -95,7 +95,35 @@ int sha1_pos(const unsigned char *sha1, void *table, size_t nr,
 			hi = mi;
 		else
 			lo = mi + 1;
-		mi = (hi + lo) / 2;
+		mi = lo + (hi - lo) / 2;
 	} while (lo < hi);
 	return -lo-1;
+}
+
+int bsearch_hash(const unsigned char *sha1, const uint32_t *fanout_nbo,
+		 const unsigned char *table, size_t stride, uint32_t *result)
+{
+	uint32_t hi, lo;
+
+	hi = ntohl(fanout_nbo[*sha1]);
+	lo = ((*sha1 == 0x0) ? 0 : ntohl(fanout_nbo[*sha1 - 1]));
+
+	while (lo < hi) {
+		unsigned mi = lo + (hi - lo) / 2;
+		int cmp = hashcmp(table + mi * stride, sha1);
+
+		if (!cmp) {
+			if (result)
+				*result = mi;
+			return 1;
+		}
+		if (cmp > 0)
+			hi = mi;
+		else
+			lo = mi + 1;
+	}
+
+	if (result)
+		*result = lo;
+	return 0;
 }

@@ -2,7 +2,9 @@
 #define REPOSITORY_H
 
 struct config_set;
+struct git_hash_algo;
 struct index_state;
+struct raw_object_store;
 struct submodule_cache;
 
 struct repository {
@@ -20,10 +22,26 @@ struct repository {
 	char *commondir;
 
 	/*
-	 * Path to the repository's object store.
-	 * Cannot be NULL after initialization.
+	 * Holds any information related to accessing the raw object content.
 	 */
-	char *objectdir;
+	struct raw_object_store *objects;
+
+	/*
+	 * All objects in this repository that have been parsed. This structure
+	 * owns all objects it references, so users of "struct object *"
+	 * generally do not need to free them; instead, when a repository is no
+	 * longer used, call parsed_object_pool_clear() on this structure, which
+	 * is called by the repositories repo_clear on its desconstruction.
+	 */
+	struct parsed_object_pool *parsed_objects;
+
+	/* The store in which the refs are held. */
+	struct ref_store *refs;
+
+	/*
+	 * Contains path to often used file names.
+	 */
+	struct path_cache cached_paths;
 
 	/*
 	 * Path to the repository's graft file.
@@ -67,16 +85,10 @@ struct repository {
 	 */
 	struct index_state *index;
 
+	/* Repository's current hash algorithm, as serialized on disk. */
+	const struct git_hash_algo *hash_algo;
+
 	/* Configurations */
-	/*
-	 * Bit used during initialization to indicate if repository state (like
-	 * the location of the 'objectdir') should be read from the
-	 * environment.  By default this bit will be set at the begining of
-	 * 'repo_init()' so that all repositories will ignore the environment.
-	 * The exception to this is 'the_repository', which doesn't go through
-	 * the normal 'repo_init()' process.
-	 */
-	unsigned ignore_env:1;
 
 	/* Indicate if a repository has a different 'commondir' from 'gitdir' */
 	unsigned different_commondir:1;
@@ -84,9 +96,27 @@ struct repository {
 
 extern struct repository *the_repository;
 
-extern void repo_set_gitdir(struct repository *repo, const char *path);
+/*
+ * Define a custom repository layout. Any field can be NULL, which
+ * will default back to the path according to the default layout.
+ */
+struct set_gitdir_args {
+	const char *commondir;
+	const char *object_dir;
+	const char *graft_file;
+	const char *index_file;
+	const char *alternate_db;
+};
+
+extern void repo_set_gitdir(struct repository *repo,
+			    const char *root,
+			    const struct set_gitdir_args *extra_args);
 extern void repo_set_worktree(struct repository *repo, const char *path);
-extern int repo_init(struct repository *repo, const char *gitdir, const char *worktree);
+extern void repo_set_hash_algo(struct repository *repo, int algo);
+extern void initialize_the_repository(void);
+extern int repo_init(struct repository *r,
+		     const char *gitdir,
+		     const char *worktree);
 extern int repo_submodule_init(struct repository *submodule,
 			       struct repository *superproject,
 			       const char *path);

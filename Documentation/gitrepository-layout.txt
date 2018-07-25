@@ -71,7 +71,7 @@ objects/info/packs::
 	This file is to help dumb transports discover what packs
 	are available in this object store.  Whenever a pack is
 	added or removed, `git update-server-info` should be run
-	to keep this file up-to-date if the repository is
+	to keep this file up to date if the repository is
 	published for dumb transports.  'git repack' does this
 	by default.
 
@@ -208,6 +208,10 @@ info/exclude::
 	'git clean' look at it but the core Git commands do not look
 	at it.  See also: linkgit:gitignore[5].
 
+info/attributes::
+	Defines which attributes to assign to a path, similar to per-directory
+	`.gitattributes` files.   See also: linkgit:gitattributes[5].
+
 info/sparse-checkout::
 	This file stores sparse checkout patterns.
 	See also: linkgit:git-read-tree[1].
@@ -270,11 +274,6 @@ worktrees/<id>/locked::
 	prevents `worktrees/<id>` from being pruned either automatically
 	or manually by `git worktree prune`. The file may contain a string
 	explaining why the repository is locked.
-
-worktrees/<id>/link::
-	If this file exists, it is a hard link to the linked .git
-	file. It is used to detect if the linked repository is
-	manually removed.
 
 SEE ALSO
 --------

@@ -7,19 +7,37 @@
 #include "decorate.h"
 #include "gpg-interface.h"
 #include "string-list.h"
+#include "pretty.h"
+
+#define COMMIT_NOT_FROM_GRAPH 0xFFFFFFFF
+#define GENERATION_NUMBER_INFINITY 0xFFFFFFFF
+#define GENERATION_NUMBER_MAX 0x3FFFFFFF
+#define GENERATION_NUMBER_ZERO 0
 
 struct commit_list {
 	struct commit *item;
 	struct commit_list *next;
 };
 
+/*
+ * The size of this struct matters in full repo walk operations like
+ * 'git clone' or 'git gc'. Consider using commit-slab to attach data
+ * to a commit instead of adding new fields here.
+ */
 struct commit {
 	struct object object;
-	void *util;
-	unsigned int index;
 	timestamp_t date;
 	struct commit_list *parents;
-	struct tree *tree;
+
+	/*
+	 * If the commit is loaded from the commit-graph file, then this
+	 * member may be NULL. Only access it through get_commit_tree()
+	 * or get_commit_tree_oid().
+	 */
+	struct tree *maybe_tree;
+	uint32_t graph_pos;
+	uint32_t generation;
+	unsigned int index;
 };
 
 extern int save_commit_buffer;
@@ -58,7 +76,7 @@ struct commit *lookup_commit_reference_by_name(const char *name);
  */
 struct commit *lookup_commit_or_die(const struct object_id *oid, const char *ref_name);
 
-int parse_commit_buffer(struct commit *item, const void *buffer, unsigned long size);
+int parse_commit_buffer(struct commit *item, const void *buffer, unsigned long size, int check_graph);
 int parse_commit_gently(struct commit *item, int quiet_on_missing);
 static inline int parse_commit(struct commit *item)
 {
@@ -98,6 +116,15 @@ void unuse_commit_buffer(const struct commit *, const void *buffer);
  */
 void free_commit_buffer(struct commit *);
 
+struct tree *get_commit_tree(const struct commit *);
+struct object_id *get_commit_tree_oid(const struct commit *);
+
+/*
+ * Release memory related to a commit, including the parent list and
+ * any cached object buffer.
+ */
+void release_commit_memory(struct commit *c);
+
 /*
  * Disassociate any cached object buffer from the commit, but do not free it.
  * The buffer (or NULL, if none) is returned.
@@ -121,93 +148,13 @@ struct commit_list *copy_commit_list(struct commit_list *list);
 
 void free_commit_list(struct commit_list *list);
 
-/* Commit formats */
-enum cmit_fmt {
-	CMIT_FMT_RAW,
-	CMIT_FMT_MEDIUM,
-	CMIT_FMT_DEFAULT = CMIT_FMT_MEDIUM,
-	CMIT_FMT_SHORT,
-	CMIT_FMT_FULL,
-	CMIT_FMT_FULLER,
-	CMIT_FMT_ONELINE,
-	CMIT_FMT_EMAIL,
-	CMIT_FMT_MBOXRD,
-	CMIT_FMT_USERFORMAT,
-
-	CMIT_FMT_UNSPECIFIED
-};
-
-static inline int cmit_fmt_is_mail(enum cmit_fmt fmt)
-{
-	return (fmt == CMIT_FMT_EMAIL || fmt == CMIT_FMT_MBOXRD);
-}
-
 struct rev_info; /* in revision.h, it circularly uses enum cmit_fmt */
-
-struct pretty_print_context {
-	/*
-	 * Callers should tweak these to change the behavior of pp_* functions.
-	 */
-	enum cmit_fmt fmt;
-	int abbrev;
-	const char *after_subject;
-	int preserve_subject;
-	struct date_mode date_mode;
-	unsigned date_mode_explicit:1;
-	int print_email_subject;
-	int expand_tabs_in_log;
-	int need_8bit_cte;
-	char *notes_message;
-	struct reflog_walk_info *reflog_info;
-	struct rev_info *rev;
-	const char *output_encoding;
-	struct string_list *mailmap;
-	int color;
-	struct ident_split *from_ident;
-
-	/*
-	 * Fields below here are manipulated internally by pp_* functions and
-	 * should not be counted on by callers.
-	 */
-	struct string_list in_body_headers;
-	int graph_width;
-};
-
-struct userformat_want {
-	unsigned notes:1;
-};
 
 extern int has_non_ascii(const char *text);
 extern const char *logmsg_reencode(const struct commit *commit,
 				   char **commit_encoding,
 				   const char *output_encoding);
-extern void get_commit_format(const char *arg, struct rev_info *);
-extern const char *format_subject(struct strbuf *sb, const char *msg,
-				  const char *line_separator);
-extern void userformat_find_requirements(const char *fmt, struct userformat_want *w);
-extern int commit_format_is_empty(enum cmit_fmt);
 extern const char *skip_blank_lines(const char *msg);
-extern void format_commit_message(const struct commit *commit,
-				  const char *format, struct strbuf *sb,
-				  const struct pretty_print_context *context);
-extern void pretty_print_commit(struct pretty_print_context *pp,
-				const struct commit *commit,
-				struct strbuf *sb);
-extern void pp_commit_easy(enum cmit_fmt fmt, const struct commit *commit,
-			   struct strbuf *sb);
-void pp_user_info(struct pretty_print_context *pp,
-		  const char *what, struct strbuf *sb,
-		  const char *line, const char *encoding);
-void pp_title_line(struct pretty_print_context *pp,
-		   const char **msg_p,
-		   struct strbuf *sb,
-		   const char *encoding,
-		   int need_8bit_cte);
-void pp_remainder(struct pretty_print_context *pp,
-		  const char **msg_p,
-		  struct strbuf *sb,
-		  int indent);
-
 
 /** Removes the first commit from a list sorted by date, and adds all
  * of its parents.
@@ -219,7 +166,6 @@ struct commit *pop_commit(struct commit_list **stack);
 
 void clear_commit_marks(struct commit *commit, unsigned int mark);
 void clear_commit_marks_many(int nr, struct commit **commit, unsigned int mark);
-void clear_commit_marks_for_object_array(struct object_array *a, unsigned mark);
 
 
 enum rev_sort_order {
@@ -247,9 +193,9 @@ struct commit_graft {
 };
 typedef int (*each_commit_graft_fn)(const struct commit_graft *, void *);
 
-struct commit_graft *read_graft_line(char *buf, int len);
-int register_commit_graft(struct commit_graft *, int);
-struct commit_graft *lookup_commit_graft(const struct object_id *oid);
+struct commit_graft *read_graft_line(struct strbuf *line);
+int register_commit_graft(struct repository *r, struct commit_graft *, int);
+struct commit_graft *lookup_commit_graft(struct repository *r, const struct object_id *oid);
 
 extern struct commit_list *get_merge_bases(struct commit *rev1, struct commit *rev2);
 extern struct commit_list *get_merge_bases_many(struct commit *one, int n, struct commit **twos);
@@ -263,15 +209,15 @@ extern struct commit_list *get_merge_bases_many_dirty(struct commit *one, int n,
 
 struct oid_array;
 struct ref;
-extern int register_shallow(const struct object_id *oid);
+extern int register_shallow(struct repository *r, const struct object_id *oid);
 extern int unregister_shallow(const struct object_id *oid);
 extern int for_each_commit_graft(each_commit_graft_fn, void *);
-extern int is_repository_shallow(void);
+extern int is_repository_shallow(struct repository *r);
 extern struct commit_list *get_shallow_commits(struct object_array *heads,
 		int depth, int shallow_flag, int not_shallow_flag);
 extern struct commit_list *get_shallow_commits_by_rev_list(
 		int ac, const char **av, int shallow_flag, int not_shallow_flag);
-extern void set_alternate_shallow_file(const char *path, int override);
+extern void set_alternate_shallow_file(struct repository *r, const char *path, int override);
 extern int write_shallow_commits(struct strbuf *out, int use_pack_protocol,
 				 const struct oid_array *extra);
 extern void setup_alternate_shallow(struct lock_file *shallow_lock,
@@ -313,7 +259,23 @@ extern int interactive_add(int argc, const char **argv, const char *prefix, int 
 extern int run_add_interactive(const char *revision, const char *patch_mode,
 			       const struct pathspec *pathspec);
 
-struct commit_list *reduce_heads(struct commit_list *heads);
+/*
+ * Takes a list of commits and returns a new list where those
+ * have been removed that can be reached from other commits in
+ * the list. It is useful for, e.g., reducing the commits
+ * randomly thrown at the git-merge command and removing
+ * redundant commits that the user shouldn't have given to it.
+ *
+ * This function destroys the STALE bit of the commit objects'
+ * flags.
+ */
+extern struct commit_list *reduce_heads(struct commit_list *heads);
+
+/*
+ * Like `reduce_heads()`, except it replaces the list. Use this
+ * instead of `foo = reduce_heads(foo);` to avoid memory leaks.
+ */
+extern void reduce_heads_replace(struct commit_list **heads);
 
 struct commit_extra_header {
 	struct commit_extra_header *next;
@@ -326,14 +288,15 @@ extern void append_merge_tag_headers(struct commit_list *parents,
 				     struct commit_extra_header ***tail);
 
 extern int commit_tree(const char *msg, size_t msg_len,
-		       const unsigned char *tree,
-		       struct commit_list *parents, unsigned char *ret,
+		       const struct object_id *tree,
+		       struct commit_list *parents, struct object_id *ret,
 		       const char *author, const char *sign_commit);
 
 extern int commit_tree_extended(const char *msg, size_t msg_len,
-				const unsigned char *tree,
-				struct commit_list *parents, unsigned char *ret,
-				const char *author, const char *sign_commit,
+				const struct object_id *tree,
+				struct commit_list *parents,
+				struct object_id *ret, const char *author,
+				const char *sign_commit,
 				struct commit_extra_header *);
 
 extern struct commit_extra_header *read_commit_extra_headers(struct commit *, const char **);
@@ -354,16 +317,16 @@ extern const char *find_commit_header(const char *msg, const char *key,
 /* Find the end of the log message, the right place for a new trailer. */
 extern int ignore_non_trailer(const char *buf, size_t len);
 
-typedef void (*each_mergetag_fn)(struct commit *commit, struct commit_extra_header *extra,
+typedef int (*each_mergetag_fn)(struct commit *commit, struct commit_extra_header *extra,
 				 void *cb_data);
 
-extern void for_each_mergetag(each_mergetag_fn fn, struct commit *commit, void *data);
+extern int for_each_mergetag(each_mergetag_fn fn, struct commit *commit, void *data);
 
 struct merge_remote_desc {
 	struct object *obj; /* the named object, could be a tag */
 	char name[FLEX_ARRAY];
 };
-#define merge_remote_util(commit) ((struct merge_remote_desc *)((commit)->util))
+extern struct merge_remote_desc *merge_remote_util(struct commit *);
 extern void set_merge_remote_desc(struct commit *commit,
 				  const char *name, struct object *obj);
 
@@ -388,6 +351,7 @@ extern int remove_signature(struct strbuf *buf);
 extern int check_commit_signature(const struct commit *commit, struct signature_check *sigc);
 
 int compare_commits_by_commit_date(const void *a_, const void *b_, void *unused);
+int compare_commits_by_gen_then_commit_date(const void *a_, const void *b_, void *unused);
 
 LAST_ARG_MUST_BE_NULL
 extern int run_commit_hook(int editor_is_used, const char *index_file, const char *name, ...);

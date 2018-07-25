@@ -121,15 +121,13 @@ static void status_printf_more(struct wt_status *s, const char *color,
 
 void wt_status_prepare(struct wt_status *s)
 {
-	struct object_id oid;
-
 	memset(s, 0, sizeof(*s));
 	memcpy(s->color_palette, default_wt_status_colors,
 	       sizeof(default_wt_status_colors));
 	s->show_untracked_files = SHOW_NORMAL_UNTRACKED_FILES;
 	s->use_color = -1;
 	s->relative_paths = 1;
-	s->branch = resolve_refdup("HEAD", 0, oid.hash, NULL);
+	s->branch = resolve_refdup("HEAD", 0, NULL, NULL);
 	s->reference = "HEAD";
 	s->fp = stdout;
 	s->index_file = get_index_file();
@@ -138,7 +136,11 @@ void wt_status_prepare(struct wt_status *s)
 	s->ignored.strdup_strings = 1;
 	s->show_branch = -1;  /* unspecified */
 	s->show_stash = 0;
+	s->ahead_behind_flags = AHEAD_BEHIND_UNSPECIFIED;
 	s->display_comment_prefix = 0;
+	s->detect_rename = -1;
+	s->rename_score = -1;
+	s->rename_limit = -1;
 }
 
 static void wt_longstatus_print_unmerged_header(struct wt_status *s)
@@ -265,7 +267,7 @@ static const char *wt_status_unmerged_status_string(int stagemask)
 	case 7:
 		return _("both modified:");
 	default:
-		die("BUG: unhandled unmerged status %x", stagemask);
+		BUG("unhandled unmerged status %x", stagemask);
 	}
 }
 
@@ -362,8 +364,6 @@ static void wt_longstatus_print_change_data(struct wt_status *s,
 	switch (change_type) {
 	case WT_STATUS_UPDATED:
 		status = d->index_status;
-		if (d->head_path)
-			one_name = d->head_path;
 		break;
 	case WT_STATUS_CHANGED:
 		if (d->new_submodule_commits || d->dirty_submodule) {
@@ -380,9 +380,17 @@ static void wt_longstatus_print_change_data(struct wt_status *s,
 		status = d->worktree_status;
 		break;
 	default:
-		die("BUG: unhandled change_type %d in wt_longstatus_print_change_data",
+		BUG("unhandled change_type %d in wt_longstatus_print_change_data",
 		    change_type);
 	}
+
+	/*
+	 * Only pick up the rename it's relevant. If the rename is for
+	 * the changed section and we're printing the updated section,
+	 * ignore it.
+	 */
+	if (d->rename_status == status)
+		one_name = d->rename_source;
 
 	one = quote_path(one_name, s->prefix, &onebuf);
 	two = quote_path(two_name, s->prefix, &twobuf);
@@ -390,10 +398,10 @@ static void wt_longstatus_print_change_data(struct wt_status *s,
 	status_printf(s, color(WT_STATUS_HEADER, s), "\t");
 	what = wt_status_diff_status_string(status);
 	if (!what)
-		die("BUG: unhandled diff status %c", status);
+		BUG("unhandled diff status %c", status);
 	len = label_width - utf8_strwidth(what);
 	assert(len >= 0);
-	if (status == DIFF_STATUS_COPIED || status == DIFF_STATUS_RENAMED)
+	if (one_name != two_name)
 		status_printf_more(s, c, "%s%.*s%s -> %s",
 				   what, len, padding, one, two);
 	else
@@ -408,7 +416,8 @@ static void wt_longstatus_print_change_data(struct wt_status *s,
 	strbuf_release(&twobuf);
 }
 
-static char short_submodule_status(struct wt_status_change_data *d) {
+static char short_submodule_status(struct wt_status_change_data *d)
+{
 	if (d->new_submodule_commits)
 		return 'M';
 	if (d->dirty_submodule & DIRTY_SUBMODULE_MODIFIED)
@@ -434,7 +443,7 @@ static void wt_status_collect_changed_cb(struct diff_queue_struct *q,
 		struct wt_status_change_data *d;
 
 		p = q->queue[i];
-		it = string_list_insert(&s->change, p->one->path);
+		it = string_list_insert(&s->change, p->two->path);
 		d = it->util;
 		if (!d) {
 			d = xcalloc(1, sizeof(*d));
@@ -461,6 +470,14 @@ static void wt_status_collect_changed_cb(struct diff_queue_struct *q,
 			/* mode_worktree is zero for a delete. */
 			break;
 
+		case DIFF_STATUS_COPIED:
+		case DIFF_STATUS_RENAMED:
+			if (d->rename_status)
+				BUG("multiple renames on the same target? how?");
+			d->rename_source = xstrdup(p->one->path);
+			d->rename_score = p->score * 100 / MAX_SCORE;
+			d->rename_status = p->status;
+			/* fallthru */
 		case DIFF_STATUS_MODIFIED:
 		case DIFF_STATUS_TYPE_CHANGED:
 		case DIFF_STATUS_UNMERGED:
@@ -469,8 +486,8 @@ static void wt_status_collect_changed_cb(struct diff_queue_struct *q,
 			oidcpy(&d->oid_index, &p->one->oid);
 			break;
 
-		case DIFF_STATUS_UNKNOWN:
-			die("BUG: worktree status unknown???");
+		default:
+			BUG("unhandled diff-files status '%c'", p->status);
 			break;
 		}
 
@@ -532,8 +549,11 @@ static void wt_status_collect_updated_cb(struct diff_queue_struct *q,
 
 		case DIFF_STATUS_COPIED:
 		case DIFF_STATUS_RENAMED:
-			d->head_path = xstrdup(p->one->path);
-			d->score = p->score * 100 / MAX_SCORE;
+			if (d->rename_status)
+				BUG("multiple renames on the same target? how?");
+			d->rename_source = xstrdup(p->one->path);
+			d->rename_score = p->score * 100 / MAX_SCORE;
+			d->rename_status = p->status;
 			/* fallthru */
 		case DIFF_STATUS_MODIFIED:
 		case DIFF_STATUS_TYPE_CHANGED:
@@ -550,6 +570,10 @@ static void wt_status_collect_updated_cb(struct diff_queue_struct *q,
 			 * values in these fields.
 			 */
 			break;
+
+		default:
+			BUG("unhandled diff-index status '%c'", p->status);
+			break;
 		}
 	}
 }
@@ -561,16 +585,19 @@ static void wt_status_collect_changes_worktree(struct wt_status *s)
 	init_revisions(&rev, NULL);
 	setup_revisions(0, NULL, &rev, NULL);
 	rev.diffopt.output_format |= DIFF_FORMAT_CALLBACK;
-	DIFF_OPT_SET(&rev.diffopt, DIRTY_SUBMODULES);
+	rev.diffopt.flags.dirty_submodules = 1;
 	rev.diffopt.ita_invisible_in_index = 1;
 	if (!s->show_untracked_files)
-		DIFF_OPT_SET(&rev.diffopt, IGNORE_UNTRACKED_IN_SUBMODULES);
+		rev.diffopt.flags.ignore_untracked_in_submodules = 1;
 	if (s->ignore_submodule_arg) {
-		DIFF_OPT_SET(&rev.diffopt, OVERRIDE_SUBMODULE_CONFIG);
+		rev.diffopt.flags.override_submodule_config = 1;
 		handle_ignore_submodules_arg(&rev.diffopt, s->ignore_submodule_arg);
 	}
 	rev.diffopt.format_callback = wt_status_collect_changed_cb;
 	rev.diffopt.format_callback_data = s;
+	rev.diffopt.detect_rename = s->detect_rename >= 0 ? s->detect_rename : rev.diffopt.detect_rename;
+	rev.diffopt.rename_limit = s->rename_limit >= 0 ? s->rename_limit : rev.diffopt.rename_limit;
+	rev.diffopt.rename_score = s->rename_score >= 0 ? s->rename_score : rev.diffopt.rename_score;
 	copy_pathspec(&rev.prune_data, &s->pathspec);
 	run_diff_files(&rev, 0);
 }
@@ -582,10 +609,10 @@ static void wt_status_collect_changes_index(struct wt_status *s)
 
 	init_revisions(&rev, NULL);
 	memset(&opt, 0, sizeof(opt));
-	opt.def = s->is_initial ? EMPTY_TREE_SHA1_HEX : s->reference;
+	opt.def = s->is_initial ? empty_tree_oid_hex() : s->reference;
 	setup_revisions(0, NULL, &rev, &opt);
 
-	DIFF_OPT_SET(&rev.diffopt, OVERRIDE_SUBMODULE_CONFIG);
+	rev.diffopt.flags.override_submodule_config = 1;
 	rev.diffopt.ita_invisible_in_index = 1;
 	if (s->ignore_submodule_arg) {
 		handle_ignore_submodules_arg(&rev.diffopt, s->ignore_submodule_arg);
@@ -604,9 +631,9 @@ static void wt_status_collect_changes_index(struct wt_status *s)
 	rev.diffopt.output_format |= DIFF_FORMAT_CALLBACK;
 	rev.diffopt.format_callback = wt_status_collect_updated_cb;
 	rev.diffopt.format_callback_data = s;
-	rev.diffopt.detect_rename = 1;
-	rev.diffopt.rename_limit = 200;
-	rev.diffopt.break_opt = 0;
+	rev.diffopt.detect_rename = s->detect_rename >= 0 ? s->detect_rename : rev.diffopt.detect_rename;
+	rev.diffopt.rename_limit = s->rename_limit >= 0 ? s->rename_limit : rev.diffopt.rename_limit;
+	rev.diffopt.rename_score = s->rename_score >= 0 ? s->rename_score : rev.diffopt.rename_score;
 	copy_pathspec(&rev.prune_data, &s->pathspec);
 	run_diff_index(&rev, 1);
 }
@@ -660,10 +687,15 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	if (s->show_untracked_files != SHOW_ALL_UNTRACKED_FILES)
 		dir.flags |=
 			DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
-	if (s->show_ignored_files)
+	if (s->show_ignored_mode) {
 		dir.flags |= DIR_SHOW_IGNORED_TOO;
-	else
+
+		if (s->show_ignored_mode == SHOW_MATCHING_IGNORED)
+			dir.flags |= DIR_SHOW_IGNORED_TOO_MODE_MATCHING;
+	} else {
 		dir.untracked = the_index.untracked;
+	}
+
 	setup_standard_excludes(&dir);
 
 	fill_directory(&dir, &the_index, &s->pathspec);
@@ -934,7 +966,7 @@ size_t wt_status_locate_end(const char *s, size_t len)
 
 void wt_status_add_cut_line(FILE *fp)
 {
-	const char *explanation = _("Do not touch the line above.\nEverything below will be removed.");
+	const char *explanation = _("Do not modify or remove the line above.\nEverything below it will be ignored.");
 	struct strbuf buf = STRBUF_INIT;
 
 	fprintf(fp, "%c %s", comment_line_char, cut_line);
@@ -951,15 +983,17 @@ static void wt_longstatus_print_verbose(struct wt_status *s)
 	const char *c = color(WT_STATUS_HEADER, s);
 
 	init_revisions(&rev, NULL);
-	DIFF_OPT_SET(&rev.diffopt, ALLOW_TEXTCONV);
+	rev.diffopt.flags.allow_textconv = 1;
 	rev.diffopt.ita_invisible_in_index = 1;
 
 	memset(&opt, 0, sizeof(opt));
-	opt.def = s->is_initial ? EMPTY_TREE_SHA1_HEX : s->reference;
+	opt.def = s->is_initial ? empty_tree_oid_hex() : s->reference;
 	setup_revisions(0, NULL, &rev, &opt);
 
 	rev.diffopt.output_format |= DIFF_FORMAT_PATCH;
-	rev.diffopt.detect_rename = 1;
+	rev.diffopt.detect_rename = s->detect_rename >= 0 ? s->detect_rename : rev.diffopt.detect_rename;
+	rev.diffopt.rename_limit = s->rename_limit >= 0 ? s->rename_limit : rev.diffopt.rename_limit;
+	rev.diffopt.rename_score = s->rename_score >= 0 ? s->rename_score : rev.diffopt.rename_score;
 	rev.diffopt.file = s->fp;
 	rev.diffopt.close_file = 0;
 	/*
@@ -1007,7 +1041,7 @@ static void wt_longstatus_print_tracking(struct wt_status *s)
 	if (!skip_prefix(s->branch, "refs/heads/", &branch_name))
 		return;
 	branch = branch_get(branch_name);
-	if (!format_tracking_info(branch, &sb))
+	if (!format_tracking_info(branch, &sb, s->ahead_behind_flags))
 		return;
 
 	i = 0;
@@ -1026,6 +1060,7 @@ static void wt_longstatus_print_tracking(struct wt_status *s)
 				 comment_line_char);
 	else
 		fputs("\n", s->fp);
+	strbuf_release(&sb);
 }
 
 static int has_unmerged(struct wt_status *s)
@@ -1161,7 +1196,7 @@ static void abbrev_sha1_in_line(struct strbuf *line)
 		strbuf_trim(split[1]);
 		if (!get_oid(split[1]->buf, &oid)) {
 			strbuf_reset(split[1]);
-			strbuf_add_unique_abbrev(split[1], oid.hash,
+			strbuf_add_unique_abbrev(split[1], &oid,
 						 DEFAULT_ABBREV);
 			strbuf_addch(split[1], ' ');
 			strbuf_reset(line);
@@ -1193,6 +1228,7 @@ static int read_rebase_todolist(const char *fname, struct string_list *lines)
 		string_list_append(lines, line.buf);
 	}
 	fclose(f);
+	strbuf_release(&line);
 	return 0;
 }
 
@@ -1281,7 +1317,7 @@ static void show_rebase_in_progress(struct wt_status *s,
 			status_printf_ln(s, color,
 				_("  (use \"git rebase --abort\" to check out the original branch)"));
 		}
-	} else if (state->rebase_in_progress || !stat(git_path_merge_msg(), &st)) {
+	} else if (state->rebase_in_progress || !stat(git_path_merge_msg(the_repository), &st)) {
 		print_rebase_state(s, state, color);
 		if (s->hints)
 			status_printf_ln(s, color,
@@ -1322,7 +1358,7 @@ static void show_cherry_pick_in_progress(struct wt_status *s,
 					const char *color)
 {
 	status_printf_ln(s, color, _("You are currently cherry-picking commit %s."),
-			find_unique_abbrev(state->cherry_pick_head_sha1, DEFAULT_ABBREV));
+			find_unique_abbrev(&state->cherry_pick_head_oid, DEFAULT_ABBREV));
 	if (s->hints) {
 		if (has_unmerged(s))
 			status_printf_ln(s, color,
@@ -1341,7 +1377,7 @@ static void show_revert_in_progress(struct wt_status *s,
 					const char *color)
 {
 	status_printf_ln(s, color, _("You are currently reverting commit %s."),
-			 find_unique_abbrev(state->revert_head_sha1, DEFAULT_ABBREV));
+			 find_unique_abbrev(&state->revert_head_oid, DEFAULT_ABBREV));
 	if (s->hints) {
 		if (has_unmerged(s))
 			status_printf_ln(s, color,
@@ -1394,7 +1430,7 @@ static char *get_branch(const struct worktree *wt, const char *path)
 		;
 	else if (!get_oid_hex(sb.buf, &oid)) {
 		strbuf_reset(&sb);
-		strbuf_add_unique_abbrev(&sb, oid.hash, DEFAULT_ABBREV);
+		strbuf_add_unique_abbrev(&sb, &oid, DEFAULT_ABBREV);
 	} else if (!strcmp(sb.buf, "detached HEAD")) /* rebase */
 		goto got_nothing;
 	else			/* bisect */
@@ -1431,7 +1467,7 @@ static int grab_1st_switch(struct object_id *ooid, struct object_id *noid,
 	if (!strcmp(cb->buf.buf, "HEAD")) {
 		/* HEAD is relative. Resolve it to the right reflog entry. */
 		strbuf_reset(&cb->buf);
-		strbuf_add_unique_abbrev(&cb->buf, noid->hash, DEFAULT_ABBREV);
+		strbuf_add_unique_abbrev(&cb->buf, noid, DEFAULT_ABBREV);
 	}
 	return 1;
 }
@@ -1449,7 +1485,7 @@ static void wt_status_get_detached_from(struct wt_status_state *state)
 		return;
 	}
 
-	if (dwim_ref(cb.buf.buf, cb.buf.len, oid.hash, &ref) == 1 &&
+	if (dwim_ref(cb.buf.buf, cb.buf.len, &oid, &ref) == 1 &&
 	    /* sha1 is a commit? match without further lookup */
 	    (!oidcmp(&cb.noid, &oid) ||
 	     /* perhaps sha1 is a tag, try to dereference to a commit */
@@ -1461,10 +1497,10 @@ static void wt_status_get_detached_from(struct wt_status_state *state)
 		state->detached_from = xstrdup(from);
 	} else
 		state->detached_from =
-			xstrdup(find_unique_abbrev(cb.noid.hash, DEFAULT_ABBREV));
-	hashcpy(state->detached_sha1, cb.noid.hash);
+			xstrdup(find_unique_abbrev(&cb.noid, DEFAULT_ABBREV));
+	oidcpy(&state->detached_oid, &cb.noid);
 	state->detached_at = !get_oid("HEAD", &oid) &&
-			     !hashcmp(oid.hash, state->detached_sha1);
+			     !oidcmp(&oid, &state->detached_oid);
 
 	free(ref);
 	strbuf_release(&cb.buf);
@@ -1516,20 +1552,20 @@ void wt_status_get_state(struct wt_status_state *state,
 	struct stat st;
 	struct object_id oid;
 
-	if (!stat(git_path_merge_head(), &st)) {
+	if (!stat(git_path_merge_head(the_repository), &st)) {
 		state->merge_in_progress = 1;
 	} else if (wt_status_check_rebase(NULL, state)) {
 		;		/* all set */
-	} else if (!stat(git_path_cherry_pick_head(), &st) &&
+	} else if (!stat(git_path_cherry_pick_head(the_repository), &st) &&
 			!get_oid("CHERRY_PICK_HEAD", &oid)) {
 		state->cherry_pick_in_progress = 1;
-		hashcpy(state->cherry_pick_head_sha1, oid.hash);
+		oidcpy(&state->cherry_pick_head_oid, &oid);
 	}
 	wt_status_check_bisect(NULL, state);
-	if (!stat(git_path_revert_head(), &st) &&
+	if (!stat(git_path_revert_head(the_repository), &st) &&
 	    !get_oid("REVERT_HEAD", &oid)) {
 		state->revert_in_progress = 1;
-		hashcpy(state->revert_head_sha1, oid.hash);
+		oidcpy(&state->revert_head_oid, &oid);
 	}
 
 	if (get_detached_from)
@@ -1619,7 +1655,7 @@ static void wt_longstatus_print(struct wt_status *s)
 	}
 	if (s->show_untracked_files) {
 		wt_longstatus_print_other(s, &s->untracked, _("Untracked files"), "add");
-		if (s->show_ignored_files)
+		if (s->show_ignored_mode)
 			wt_longstatus_print_other(s, &s->ignored, _("Ignored files"), "add -f");
 		if (advice_status_u_option && 2000 < s->untracked_in_ms) {
 			status_printf_ln(s, GIT_COLOR_NORMAL, "%s", "");
@@ -1714,13 +1750,14 @@ static void wt_shortstatus_status(struct string_list_item *it,
 	putchar(' ');
 	if (s->null_termination) {
 		fprintf(stdout, "%s%c", it->string, 0);
-		if (d->head_path)
-			fprintf(stdout, "%s%c", d->head_path, 0);
+		if (d->rename_source)
+			fprintf(stdout, "%s%c", d->rename_source, 0);
 	} else {
 		struct strbuf onebuf = STRBUF_INIT;
 		const char *one;
-		if (d->head_path) {
-			one = quote_path(d->head_path, s->prefix, &onebuf);
+
+		if (d->rename_source) {
+			one = quote_path(d->rename_source, s->prefix, &onebuf);
 			if (*one != '"' && strchr(one, ' ') != NULL) {
 				putchar('"');
 				strbuf_addch(&onebuf, '"');
@@ -1765,7 +1802,7 @@ static void wt_shortstatus_print_tracking(struct wt_status *s)
 	const char *base;
 	char *short_base;
 	const char *branch_name;
-	int num_ours, num_theirs;
+	int num_ours, num_theirs, sti;
 	int upstream_is_gone = 0;
 
 	color_fprintf(s->fp, color(WT_STATUS_HEADER, s), "## ");
@@ -1791,7 +1828,9 @@ static void wt_shortstatus_print_tracking(struct wt_status *s)
 
 	color_fprintf(s->fp, branch_color_local, "%s", branch_name);
 
-	if (stat_tracking_info(branch, &num_ours, &num_theirs, &base) < 0) {
+	sti = stat_tracking_info(branch, &num_ours, &num_theirs, &base,
+				 s->ahead_behind_flags);
+	if (sti < 0) {
 		if (!base)
 			goto conclude;
 
@@ -1803,12 +1842,14 @@ static void wt_shortstatus_print_tracking(struct wt_status *s)
 	color_fprintf(s->fp, branch_color_remote, "%s", short_base);
 	free(short_base);
 
-	if (!upstream_is_gone && !num_ours && !num_theirs)
+	if (!upstream_is_gone && !sti)
 		goto conclude;
 
 	color_fprintf(s->fp, header_color, " [");
 	if (upstream_is_gone) {
 		color_fprintf(s->fp, header_color, LABEL(N_("gone")));
+	} else if (s->ahead_behind_flags == AHEAD_BEHIND_QUICK) {
+		color_fprintf(s->fp, header_color, LABEL(N_("different")));
 	} else if (!num_ours) {
 		color_fprintf(s->fp, header_color, LABEL(N_("behind ")));
 		color_fprintf(s->fp, branch_color_remote, "%d", num_theirs);
@@ -1877,18 +1918,19 @@ static void wt_porcelain_print(struct wt_status *s)
  *
  *    <upstream> ::= the upstream branch name, when set.
  *
- *       <ahead> ::= integer ahead value, when upstream set
- *                   and the commit is present (not gone).
+ *       <ahead> ::= integer ahead value or '?'.
  *
- *      <behind> ::= integer behind value, when upstream set
- *                   and commit is present.
- *
+ *      <behind> ::= integer behind value or '?'.
  *
  * The end-of-line is defined by the -z flag.
  *
  *                 <eol> ::= NUL when -z,
  *                           LF when NOT -z.
  *
+ * When an upstream is set and present, the 'branch.ab' line will
+ * be printed with the ahead/behind counts for the branch and the
+ * upstream.  When AHEAD_BEHIND_QUICK is requested and the branches
+ * are different, '?' will be substituted for the actual count.
  */
 static void wt_porcelain_v2_print_tracking(struct wt_status *s)
 {
@@ -1928,14 +1970,25 @@ static void wt_porcelain_v2_print_tracking(struct wt_status *s)
 		/* Lookup stats on the upstream tracking branch, if set. */
 		branch = branch_get(branch_name);
 		base = NULL;
-		ab_info = (stat_tracking_info(branch, &nr_ahead, &nr_behind, &base) == 0);
+		ab_info = stat_tracking_info(branch, &nr_ahead, &nr_behind,
+					     &base, s->ahead_behind_flags);
 		if (base) {
 			base = shorten_unambiguous_ref(base, 0);
 			fprintf(s->fp, "# branch.upstream %s%c", base, eol);
 			free((char *)base);
 
-			if (ab_info)
-				fprintf(s->fp, "# branch.ab +%d -%d%c", nr_ahead, nr_behind, eol);
+			if (ab_info > 0) {
+				/* different */
+				if (nr_ahead || nr_behind)
+					fprintf(s->fp, "# branch.ab +%d -%d%c",
+						nr_ahead, nr_behind, eol);
+				else
+					fprintf(s->fp, "# branch.ab +? -?%c",
+						eol);
+			} else if (!ab_info) {
+				/* same */
+				fprintf(s->fp, "# branch.ab +0 -0%c", eol);
+			}
 		}
 	}
 
@@ -2025,10 +2078,10 @@ static void wt_porcelain_v2_print_changed_entry(
 	struct wt_status *s)
 {
 	struct wt_status_change_data *d = it->util;
-	struct strbuf buf_index = STRBUF_INIT;
-	struct strbuf buf_head = STRBUF_INIT;
-	const char *path_index = NULL;
-	const char *path_head = NULL;
+	struct strbuf buf = STRBUF_INIT;
+	struct strbuf buf_from = STRBUF_INIT;
+	const char *path = NULL;
+	const char *path_from = NULL;
 	char key[3];
 	char submodule_token[5];
 	char sep_char, eol_char;
@@ -2047,8 +2100,8 @@ static void wt_porcelain_v2_print_changed_entry(
 		 */
 		sep_char = '\0';
 		eol_char = '\0';
-		path_index = it->string;
-		path_head = d->head_path;
+		path = it->string;
+		path_from = d->rename_source;
 	} else {
 		/*
 		 * Path(s) are C-quoted if necessary. Current path is ALWAYS first.
@@ -2058,27 +2111,27 @@ static void wt_porcelain_v2_print_changed_entry(
 		 */
 		sep_char = '\t';
 		eol_char = '\n';
-		path_index = quote_path(it->string, s->prefix, &buf_index);
-		if (d->head_path)
-			path_head = quote_path(d->head_path, s->prefix, &buf_head);
+		path = quote_path(it->string, s->prefix, &buf);
+		if (d->rename_source)
+			path_from = quote_path(d->rename_source, s->prefix, &buf_from);
 	}
 
-	if (path_head)
+	if (path_from)
 		fprintf(s->fp, "2 %s %s %06o %06o %06o %s %s %c%d %s%c%s%c",
 				key, submodule_token,
 				d->mode_head, d->mode_index, d->mode_worktree,
 				oid_to_hex(&d->oid_head), oid_to_hex(&d->oid_index),
-				key[0], d->score,
-				path_index, sep_char, path_head, eol_char);
+				d->rename_status, d->rename_score,
+				path, sep_char, path_from, eol_char);
 	else
 		fprintf(s->fp, "1 %s %s %06o %06o %06o %s %s %s%c",
 				key, submodule_token,
 				d->mode_head, d->mode_index, d->mode_worktree,
 				oid_to_hex(&d->oid_head), oid_to_hex(&d->oid_index),
-				path_index, eol_char);
+				path, eol_char);
 
-	strbuf_release(&buf_index);
-	strbuf_release(&buf_head);
+	strbuf_release(&buf);
+	strbuf_release(&buf_from);
 }
 
 /*
@@ -2113,7 +2166,7 @@ static void wt_porcelain_v2_print_unmerged_entry(
 	case 6: key = "AA"; break; /* both added */
 	case 7: key = "UU"; break; /* both modified */
 	default:
-		die("BUG: unhandled unmerged status %x", d->stagemask);
+		BUG("unhandled unmerged status %x", d->stagemask);
 	}
 
 	/*
@@ -2140,7 +2193,7 @@ static void wt_porcelain_v2_print_unmerged_entry(
 		sum |= (1 << (stage - 1));
 	}
 	if (sum != d->stagemask)
-		die("BUG: observed stagemask 0x%x != expected stagemask 0x%x", sum, d->stagemask);
+		BUG("observed stagemask 0x%x != expected stagemask 0x%x", sum, d->stagemask);
 
 	if (s->null_termination)
 		path_index = it->string;
@@ -2244,7 +2297,7 @@ void wt_status_print(struct wt_status *s)
 		wt_porcelain_v2_print(s);
 		break;
 	case STATUS_FORMAT_UNSPECIFIED:
-		die("BUG: finalize_deferred_config() should have been called");
+		BUG("finalize_deferred_config() should have been called");
 		break;
 	case STATUS_FORMAT_NONE:
 	case STATUS_FORMAT_LONG:
@@ -2262,9 +2315,11 @@ int has_unstaged_changes(int ignore_submodules)
 	int result;
 
 	init_revisions(&rev_info, NULL);
-	if (ignore_submodules)
-		DIFF_OPT_SET(&rev_info.diffopt, IGNORE_SUBMODULES);
-	DIFF_OPT_SET(&rev_info.diffopt, QUICK);
+	if (ignore_submodules) {
+		rev_info.diffopt.flags.ignore_submodules = 1;
+		rev_info.diffopt.flags.override_submodule_config = 1;
+	}
+	rev_info.diffopt.flags.quick = 1;
 	diff_setup_done(&rev_info.diffopt);
 	result = run_diff_files(&rev_info, 0);
 	return diff_result_code(&rev_info.diffopt, result);
@@ -2283,8 +2338,8 @@ int has_uncommitted_changes(int ignore_submodules)
 
 	init_revisions(&rev_info, NULL);
 	if (ignore_submodules)
-		DIFF_OPT_SET(&rev_info.diffopt, IGNORE_SUBMODULES);
-	DIFF_OPT_SET(&rev_info.diffopt, QUICK);
+		rev_info.diffopt.flags.ignore_submodules = 1;
+	rev_info.diffopt.flags.quick = 1;
 	add_head_to_pending(&rev_info);
 	diff_setup_done(&rev_info.diffopt);
 	result = run_diff_index(&rev_info, 1);
@@ -2297,14 +2352,14 @@ int has_uncommitted_changes(int ignore_submodules)
  */
 int require_clean_work_tree(const char *action, const char *hint, int ignore_submodules, int gently)
 {
-	struct lock_file *lock_file = xcalloc(1, sizeof(*lock_file));
+	struct lock_file lock_file = LOCK_INIT;
 	int err = 0, fd;
 
-	fd = hold_locked_index(lock_file, 0);
+	fd = hold_locked_index(&lock_file, 0);
 	refresh_cache(REFRESH_QUIET);
 	if (0 <= fd)
-		update_index_if_able(&the_index, lock_file);
-	rollback_lock_file(lock_file);
+		update_index_if_able(&the_index, &lock_file);
+	rollback_lock_file(&lock_file);
 
 	if (has_unstaged_changes(ignore_submodules)) {
 		/* TRANSLATORS: the action is e.g. "pull with rebase" */

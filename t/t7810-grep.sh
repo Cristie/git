@@ -60,6 +60,18 @@ test_expect_success setup '
 		echo " line with leading space3"
 		echo "line without leading space2"
 	} >space &&
+	cat >hello.ps1 <<-\EOF &&
+	# No-op.
+	function dummy() {}
+
+	# Say hello.
+	function hello() {
+	  echo "Hello world."
+	} # hello
+
+	# Still a no-op.
+	function dummy() {}
+	EOF
 	git add . &&
 	test_tick &&
 	git commit -m initial
@@ -84,6 +96,101 @@ do
 			echo ${HC}file:5:foo_mmap bar mmap baz
 		} >expected &&
 		git -c grep.linenumber=false grep -n -w -e mmap $H >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep -w $L (with --column)" '
+		{
+			echo ${HC}file:5:foo mmap bar
+			echo ${HC}file:14:foo_mmap bar mmap
+			echo ${HC}file:5:foo mmap bar_mmap
+			echo ${HC}file:14:foo_mmap bar mmap baz
+		} >expected &&
+		git grep --column -w -e mmap $H >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep -w $L (with --column, extended OR)" '
+		{
+			echo ${HC}file:14:foo_mmap bar mmap
+			echo ${HC}file:19:foo_mmap bar mmap baz
+		} >expected &&
+		git grep --column -w -e mmap$ --or -e baz $H >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep -w $L (with --column, --invert)" '
+		{
+			echo ${HC}file:1:foo mmap bar
+			echo ${HC}file:1:foo_mmap bar
+			echo ${HC}file:1:foo_mmap bar mmap
+			echo ${HC}file:1:foo mmap bar_mmap
+		} >expected &&
+		git grep --column --invert -w -e baz $H -- file >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep $L (with --column, --invert, extended OR)" '
+		{
+			echo ${HC}hello_world:6:HeLLo_world
+		} >expected &&
+		git grep --column --invert -e ll --or --not -e _ $H -- hello_world \
+			>actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep $L (with --column, --invert, extended AND)" '
+		{
+			echo ${HC}hello_world:3:Hello world
+			echo ${HC}hello_world:3:Hello_world
+			echo ${HC}hello_world:6:HeLLo_world
+		} >expected &&
+		git grep --column --invert --not -e _ --and --not -e ll $H -- hello_world \
+			>actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep $L (with --column, double-negation)" '
+		{
+			echo ${HC}file:1:foo_mmap bar mmap baz
+		} >expected &&
+		git grep --column --not \( --not -e foo --or --not -e baz \) $H -- file \
+			>actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep -w $L (with --column, -C)" '
+		{
+			echo ${HC}file:5:foo mmap bar
+			echo ${HC}file-foo_mmap bar
+			echo ${HC}file:14:foo_mmap bar mmap
+			echo ${HC}file:5:foo mmap bar_mmap
+			echo ${HC}file:14:foo_mmap bar mmap baz
+		} >expected &&
+		git grep --column -w -C1 -e mmap $H >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep -w $L (with --line-number, --column)" '
+		{
+			echo ${HC}file:1:5:foo mmap bar
+			echo ${HC}file:3:14:foo_mmap bar mmap
+			echo ${HC}file:4:5:foo mmap bar_mmap
+			echo ${HC}file:5:14:foo_mmap bar mmap baz
+		} >expected &&
+		git grep -n --column -w -e mmap $H >actual &&
+		test_cmp expected actual
+	'
+
+	test_expect_success "grep -w $L (with non-extended patterns, --column)" '
+		{
+			echo ${HC}file:5:foo mmap bar
+			echo ${HC}file:10:foo_mmap bar
+			echo ${HC}file:10:foo_mmap bar mmap
+			echo ${HC}file:5:foo mmap bar_mmap
+			echo ${HC}file:10:foo_mmap bar mmap baz
+		} >expected &&
+		git grep --column -w -e bar -e mmap $H >actual &&
 		test_cmp expected actual
 	'
 
@@ -766,18 +873,27 @@ test_expect_success 'grep -W shows no trailing empty lines' '
 	test_cmp expected actual
 '
 
-cat >expected <<EOF
-hello.c=	printf("Hello world.\n");
-hello.c:	return 0;
-hello.c-	/* char ?? */
-EOF
-
 test_expect_success 'grep -W with userdiff' '
 	test_when_finished "rm -f .gitattributes" &&
-	git config diff.custom.xfuncname "(printf.*|})$" &&
-	echo "hello.c diff=custom" >.gitattributes &&
-	git grep -W return >actual &&
-	test_cmp expected actual
+	git config diff.custom.xfuncname "^function .*$" &&
+	echo "hello.ps1 diff=custom" >.gitattributes &&
+	git grep -W echo >function-context-userdiff-actual
+'
+
+test_expect_success ' includes preceding comment' '
+	grep "# Say hello" function-context-userdiff-actual
+'
+
+test_expect_success ' includes function line' '
+	grep "=function hello" function-context-userdiff-actual
+'
+
+test_expect_success ' includes matching line' '
+	grep ":  echo" function-context-userdiff-actual
+'
+
+test_expect_success ' includes last line of the function' '
+	grep "} # hello" function-context-userdiff-actual
 '
 
 for threads in $(test_seq 0 10)
@@ -1108,6 +1224,12 @@ test_expect_success !PCRE 'grep --perl-regexp pattern errors without PCRE' '
 test_expect_success PCRE 'grep -P pattern' '
 	git grep -P "\p{Ps}.*?\p{Pe}" hello.c >actual &&
 	test_cmp expected actual
+'
+
+test_expect_success LIBPCRE2 "grep -P with (*NO_JIT) doesn't error out" '
+	git grep -P "(*NO_JIT)\p{Ps}.*?\p{Pe}" hello.c >actual &&
+	test_cmp expected actual
+
 '
 
 test_expect_success !PCRE 'grep -P pattern errors without PCRE' '

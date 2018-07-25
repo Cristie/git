@@ -10,6 +10,8 @@
 #include "progress.h"
 #include "list-objects.h"
 #include "packfile.h"
+#include "worktree.h"
+#include "object-store.h"
 
 struct connectivity_progress {
 	struct progress *progress;
@@ -76,7 +78,7 @@ static void add_recent_object(const struct object_id *oid,
 	 * later processing, and the revision machinery expects
 	 * commits and tags to have been parsed.
 	 */
-	type = sha1_object_info(oid->hash, NULL);
+	type = oid_object_info(the_repository, oid, NULL);
 	if (type < 0)
 		die("unable to get object info for %s", oid_to_hex(oid));
 
@@ -93,7 +95,7 @@ static void add_recent_object(const struct object_id *oid,
 		break;
 	default:
 		die("unknown object type for %s: %s",
-		    oid_to_hex(oid), typename(type));
+		    oid_to_hex(oid), type_name(type));
 	}
 
 	if (!obj)
@@ -177,6 +179,7 @@ void mark_reachable_objects(struct rev_info *revs, int mark_reflog,
 
 	/* detached HEAD is not included in the list above */
 	head_ref(add_one_ref, revs);
+	other_head_refs(add_one_ref, revs);
 
 	/* Add all reflog info */
 	if (mark_reflog)

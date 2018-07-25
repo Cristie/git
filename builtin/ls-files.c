@@ -31,6 +31,7 @@ static int show_resolve_undo;
 static int show_modified;
 static int show_killed;
 static int show_valid_bit;
+static int show_fsmonitor_bit;
 static int line_terminator = '\n';
 static int debug_mode;
 static int show_eol;
@@ -86,7 +87,8 @@ static const char *get_tag(const struct cache_entry *ce, const char *tag)
 {
 	static char alttag[4];
 
-	if (tag && *tag && show_valid_bit && (ce->ce_flags & CE_VALID)) {
+	if (tag && *tag && ((show_valid_bit && (ce->ce_flags & CE_VALID)) ||
+		(show_fsmonitor_bit && (ce->ce_flags & CE_FSMONITOR_VALID)))) {
 		memcpy(alttag, tag, 3);
 
 		if (isalpha(tag[0])) {
@@ -164,7 +166,7 @@ static void show_killed_files(const struct index_state *istate,
 				 */
 				pos = index_name_pos(istate, ent->name, ent->len);
 				if (0 <= pos)
-					die("BUG: killed-file %.*s not found",
+					BUG("killed-file %.*s not found",
 						ent->len, ent->name);
 				pos = -pos - 1;
 				while (pos < istate->cache_nr &&
@@ -238,7 +240,7 @@ static void show_ce(struct repository *repo, struct dir_struct *dir,
 			printf("%s%06o %s %d\t",
 			       tag,
 			       ce->ce_mode,
-			       find_unique_abbrev(ce->oid.hash, abbrev),
+			       find_unique_abbrev(&ce->oid, abbrev),
 			       ce_stage(ce));
 		}
 		write_eolinfo(repo->index, ce, fullname);
@@ -269,7 +271,7 @@ static void show_ru_info(const struct index_state *istate)
 			if (!ui->mode[i])
 				continue;
 			printf("%s%06o %s %d\t", tag_resolve_undo, ui->mode[i],
-			       find_unique_abbrev(ui->sha1[i], abbrev),
+			       find_unique_abbrev(&ui->oid[i], abbrev),
 			       i + 1);
 			write_name(path);
 		}
@@ -515,6 +517,8 @@ int cmd_ls_files(int argc, const char **argv, const char *cmd_prefix)
 			N_("identify the file status with tags")),
 		OPT_BOOL('v', NULL, &show_valid_bit,
 			N_("use lowercase letters for 'assume unchanged' files")),
+		OPT_BOOL('f', NULL, &show_fsmonitor_bit,
+			N_("use lowercase letters for 'fsmonitor clean' files")),
 		OPT_BOOL('c', "cached", &show_cached,
 			N_("show cached files in the output (default)")),
 		OPT_BOOL('d', "deleted", &show_deleted,
@@ -552,9 +556,9 @@ int cmd_ls_files(int argc, const char **argv, const char *cmd_prefix)
 		{ OPTION_CALLBACK, 0, "exclude-standard", &dir, NULL,
 			N_("add the standard git exclusions"),
 			PARSE_OPT_NOARG, option_parse_exclude_standard },
-		{ OPTION_SET_INT, 0, "full-name", &prefix_len, NULL,
-			N_("make the output relative to the project top directory"),
-			PARSE_OPT_NOARG | PARSE_OPT_NONEG, NULL },
+		OPT_SET_INT_F(0, "full-name", &prefix_len,
+			      N_("make the output relative to the project top directory"),
+			      0, PARSE_OPT_NONEG),
 		OPT_BOOL(0, "recurse-submodules", &recurse_submodules,
 			N_("recurse through submodules")),
 		OPT_BOOL(0, "error-unmatch", &error_unmatch,
@@ -584,7 +588,7 @@ int cmd_ls_files(int argc, const char **argv, const char *cmd_prefix)
 	for (i = 0; i < exclude_list.nr; i++) {
 		add_exclude(exclude_list.items[i].string, "", 0, el, --exclude_args);
 	}
-	if (show_tag || show_valid_bit) {
+	if (show_tag || show_valid_bit || show_fsmonitor_bit) {
 		tag_cached = "H ";
 		tag_unmerged = "M ";
 		tag_removed = "R ";
@@ -673,5 +677,6 @@ int cmd_ls_files(int argc, const char **argv, const char *cmd_prefix)
 		return bad ? 1 : 0;
 	}
 
+	UNLEAK(dir);
 	return 0;
 }

@@ -1,6 +1,32 @@
 #ifndef OBJECT_H
 #define OBJECT_H
 
+struct parsed_object_pool {
+	struct object **obj_hash;
+	int nr_objs, obj_hash_size;
+
+	/* TODO: migrate alloc_states to mem-pool? */
+	struct alloc_state *blob_state;
+	struct alloc_state *tree_state;
+	struct alloc_state *commit_state;
+	struct alloc_state *tag_state;
+	struct alloc_state *object_state;
+	unsigned commit_count;
+
+	/* parent substitutions from .git/info/grafts and .git/shallow */
+	struct commit_graft **grafts;
+	int grafts_alloc, grafts_nr;
+
+	int is_shallow;
+	struct stat_validity *shallow_stat;
+	char *alternate_shallow_file;
+
+	int commit_graft_prepared;
+};
+
+struct parsed_object_pool *parsed_object_pool_new(void);
+void parsed_object_pool_clear(struct parsed_object_pool *o);
+
 struct object_list {
 	struct object *item;
 	struct object_list *next;
@@ -25,20 +51,25 @@ struct object_array {
 
 #define OBJECT_ARRAY_INIT { 0, 0, NULL }
 
-#define TYPE_BITS   3
 /*
  * object flag allocation:
- * revision.h:      0---------10                                26
- * fetch-pack.c:    0---5
- * walker.c:        0-2
- * upload-pack.c:       4       11----------------19
- * builtin/blame.c:               12-13
- * bisect.c:                               16
- * bundle.c:                               16
- * http-push.c:                            16-----19
- * commit.c:                               16-----19
- * sha1_name.c:                                     20
- * builtin/fsck.c:  0--3
+ * revision.h:               0---------10                              2526
+ * fetch-pack.c:             0----5
+ * walker.c:                 0-2
+ * upload-pack.c:                4       11----------------19
+ * builtin/blame.c:                        12-13
+ * bisect.c:                                        16
+ * bundle.c:                                        16
+ * http-push.c:                                     16-----19
+ * commit.c:                                        16-----19
+ * sha1-name.c:                                              20
+ * list-objects-filter.c:                                      21
+ * builtin/fsck.c:           0--3
+ * builtin/index-pack.c:                                     2021
+ * builtin/pack-objects.c:                                   20
+ * builtin/reflog.c:                   10--12
+ * builtin/show-branch.c:    0-------------------------------------------26
+ * builtin/unpack-objects.c:                                 2021
  */
 #define FLAG_BITS  27
 
@@ -52,7 +83,7 @@ struct object {
 	struct object_id oid;
 };
 
-extern const char *typename(unsigned int type);
+extern const char *type_name(unsigned int type);
 extern int type_from_string_gently(const char *str, ssize_t, int gentle);
 #define type_from_string(str) type_from_string_gently(str, -1, 0)
 
@@ -80,7 +111,7 @@ extern struct object *get_indexed_object(unsigned int);
  */
 struct object *lookup_object(const unsigned char *sha1);
 
-extern void *create_object(const unsigned char *sha1, void *obj);
+extern void *create_object(struct repository *r, const unsigned char *sha1, void *obj);
 
 void *object_as_type(struct object *obj, enum object_type type, int quiet);
 
@@ -116,6 +147,14 @@ int object_list_contains(struct object_list *list, struct object *obj);
 void add_object_array(struct object *obj, const char *name, struct object_array *array);
 void add_object_array_with_path(struct object *obj, const char *name, struct object_array *array, unsigned mode, const char *path);
 
+/*
+ * Returns NULL if the array is empty. Otherwise, returns the last object
+ * after removing its entry from the array. Other resources associated
+ * with that object are left in an unspecified state and should not be
+ * examined.
+ */
+struct object *object_array_pop(struct object_array *array);
+
 typedef int (*object_array_each_func_t)(struct object_array_entry *, void *);
 
 /*
@@ -139,5 +178,10 @@ void object_array_remove_duplicates(struct object_array *array);
 void object_array_clear(struct object_array *array);
 
 void clear_object_flags(unsigned flags);
+
+/*
+ * Clear the specified object flags from all in-core commit objects.
+ */
+extern void clear_commit_marks_all(unsigned int flags);
 
 #endif /* OBJECT_H */

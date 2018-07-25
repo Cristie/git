@@ -1,11 +1,31 @@
 #include "cache.h"
 #include "refs.h"
+#include "object-store.h"
 #include "cache-tree.h"
 #include "mergesort.h"
 #include "diff.h"
 #include "diffcore.h"
 #include "tag.h"
 #include "blame.h"
+#include "alloc.h"
+#include "commit-slab.h"
+
+define_commit_slab(blame_suspects, struct blame_origin *);
+static struct blame_suspects blame_suspects;
+
+struct blame_origin *get_blame_suspects(struct commit *commit)
+{
+	struct blame_origin **result;
+
+	result = blame_suspects_peek(&blame_suspects, commit);
+
+	return result ? *result : NULL;
+}
+
+static void set_blame_suspects(struct commit *commit, struct blame_origin *origin)
+{
+	*blame_suspects_at(&blame_suspects, commit) = origin;
+}
 
 void blame_origin_decref(struct blame_origin *o)
 {
@@ -15,12 +35,12 @@ void blame_origin_decref(struct blame_origin *o)
 			blame_origin_decref(o->previous);
 		free(o->file.ptr);
 		/* Should be present exactly once in commit chain */
-		for (p = o->commit->util; p; l = p, p = p->next) {
+		for (p = get_blame_suspects(o->commit); p; l = p, p = p->next) {
 			if (p == o) {
 				if (l)
 					l->next = p->next;
 				else
-					o->commit->util = p->next;
+					set_blame_suspects(o->commit, p->next);
 				free(o);
 				return;
 			}
@@ -41,8 +61,8 @@ static struct blame_origin *make_origin(struct commit *commit, const char *path)
 	FLEX_ALLOC_STR(o, path, path);
 	o->commit = commit;
 	o->refcnt = 1;
-	o->next = commit->util;
-	commit->util = o;
+	o->next = get_blame_suspects(commit);
+	set_blame_suspects(commit, o);
 	return o;
 }
 
@@ -54,13 +74,13 @@ static struct blame_origin *get_origin(struct commit *commit, const char *path)
 {
 	struct blame_origin *o, *l;
 
-	for (o = commit->util, l = NULL; o; l = o, o = o->next) {
+	for (o = get_blame_suspects(commit), l = NULL; o; l = o, o = o->next) {
 		if (!strcmp(o->path, path)) {
 			/* bump to front */
 			if (l) {
 				l->next = o->next;
-				o->next = commit->util;
-				commit->util = o;
+				o->next = get_blame_suspects(commit);
+				set_blame_suspects(commit, o);
 			}
 			return blame_origin_incref(o);
 		}
@@ -80,8 +100,8 @@ static void verify_working_tree_path(struct commit *work_tree, const char *path)
 		struct object_id blob_oid;
 		unsigned mode;
 
-		if (!get_tree_entry(commit_oid->hash, path, blob_oid.hash, &mode) &&
-		    sha1_object_info(blob_oid.hash, NULL) == OBJ_BLOB)
+		if (!get_tree_entry(commit_oid, path, &blob_oid, &mode) &&
+		    oid_object_info(the_repository, &blob_oid, NULL) == OBJ_BLOB)
 			return;
 	}
 
@@ -110,17 +130,19 @@ static void append_merge_parents(struct commit_list **tail)
 	int merge_head;
 	struct strbuf line = STRBUF_INIT;
 
-	merge_head = open(git_path_merge_head(), O_RDONLY);
+	merge_head = open(git_path_merge_head(the_repository), O_RDONLY);
 	if (merge_head < 0) {
 		if (errno == ENOENT)
 			return;
-		die("cannot open '%s' for reading", git_path_merge_head());
+		die("cannot open '%s' for reading",
+		    git_path_merge_head(the_repository));
 	}
 
 	while (!strbuf_getwholeline_fd(&line, merge_head, '\n')) {
 		struct object_id oid;
 		if (line.len < GIT_SHA1_HEXSZ || get_oid_hex(line.buf, &oid))
-			die("unknown line in '%s': %s", git_path_merge_head(), line.buf);
+			die("unknown line in '%s': %s",
+			    git_path_merge_head(the_repository), line.buf);
 		tail = append_parent(tail, &oid);
 	}
 	close(merge_head);
@@ -161,12 +183,12 @@ static struct commit *fake_working_tree_commit(struct diff_options *opt,
 
 	read_cache();
 	time(&now);
-	commit = alloc_commit_node();
+	commit = alloc_commit_node(the_repository);
 	commit->object.parsed = 1;
 	commit->date = now;
 	parent_tail = &commit->parents;
 
-	if (!resolve_ref_unsafe("HEAD", RESOLVE_REF_READING, head_oid.hash, NULL))
+	if (!resolve_ref_unsafe("HEAD", RESOLVE_REF_READING, &head_oid, NULL))
 		die("no such ref: HEAD");
 
 	parent_tail = append_parent(parent_tail, &head_oid);
@@ -209,7 +231,7 @@ static struct commit *fake_working_tree_commit(struct diff_options *opt,
 
 		switch (st.st_mode & S_IFMT) {
 		case S_IFREG:
-			if (DIFF_OPT_TST(opt, ALLOW_TEXTCONV) &&
+			if (opt->flags.allow_textconv &&
 			    textconv_object(read_from, mode, &null_oid, 0, &buf_ptr, &buf_len))
 				strbuf_attach(&buf, buf_ptr, buf_len, buf_len + 1);
 			else if (strbuf_read_file(&buf, read_from, st.st_size) != st.st_size)
@@ -232,7 +254,7 @@ static struct commit *fake_working_tree_commit(struct diff_options *opt,
 	convert_to_git(&the_index, path, buf.buf, buf.len, &buf, 0);
 	origin->file.ptr = buf.buf;
 	origin->file.size = buf.len;
-	pretend_sha1_file(buf.buf, buf.len, OBJ_BLOB, origin->blob_oid.hash);
+	pretend_object_file(buf.buf, buf.len, OBJ_BLOB, &origin->blob_oid);
 
 	/*
 	 * Read the current index, replace the path entry with
@@ -293,12 +315,12 @@ static void fill_origin_blob(struct diff_options *opt,
 		unsigned long file_size;
 
 		(*num_read_blob)++;
-		if (DIFF_OPT_TST(opt, ALLOW_TEXTCONV) &&
+		if (opt->flags.allow_textconv &&
 		    textconv_object(o->path, o->mode, &o->blob_oid, 1, &file->ptr, &file_size))
 			;
 		else
-			file->ptr = read_sha1_file(o->blob_oid.hash, &type,
-						   &file_size);
+			file->ptr = read_object_file(&o->blob_oid, &type,
+						     &file_size);
 		file->size = file_size;
 
 		if (!file->ptr)
@@ -478,7 +500,7 @@ static void queue_blames(struct blame_scoreboard *sb, struct blame_origin *porig
 		porigin->suspects = blame_merge(porigin->suspects, sorted);
 	else {
 		struct blame_origin *o;
-		for (o = porigin->commit->util; o; o = o->next) {
+		for (o = get_blame_suspects(porigin->commit); o; o = o->next) {
 			if (o->suspects) {
 				porigin->suspects = sorted;
 				return;
@@ -502,11 +524,9 @@ static int fill_blob_sha1_and_mode(struct blame_origin *origin)
 {
 	if (!is_null_oid(&origin->blob_oid))
 		return 0;
-	if (get_tree_entry(origin->commit->object.oid.hash,
-			   origin->path,
-			   origin->blob_oid.hash, &origin->mode))
+	if (get_tree_entry(&origin->commit->object.oid, origin->path, &origin->blob_oid, &origin->mode))
 		goto error_out;
-	if (sha1_object_info(origin->blob_oid.hash, NULL) != OBJ_BLOB)
+	if (oid_object_info(the_repository, &origin->blob_oid, NULL) != OBJ_BLOB)
 		goto error_out;
 	return 0;
  error_out:
@@ -527,7 +547,7 @@ static struct blame_origin *find_origin(struct commit *parent,
 	const char *paths[2];
 
 	/* First check any existing origins */
-	for (porigin = parent->util; porigin; porigin = porigin->next)
+	for (porigin = get_blame_suspects(parent); porigin; porigin = porigin->next)
 		if (!strcmp(porigin->path, origin->path)) {
 			/*
 			 * The same path between origin and its parent
@@ -541,7 +561,7 @@ static struct blame_origin *find_origin(struct commit *parent,
 	 * same and diff-tree is fairly efficient about this.
 	 */
 	diff_setup(&diff_opts);
-	DIFF_OPT_SET(&diff_opts, RECURSIVE);
+	diff_opts.flags.recursive = 1;
 	diff_opts.detect_rename = 0;
 	diff_opts.output_format = DIFF_FORMAT_NO_OUTPUT;
 	paths[0] = origin->path;
@@ -553,10 +573,10 @@ static struct blame_origin *find_origin(struct commit *parent,
 	diff_setup_done(&diff_opts);
 
 	if (is_null_oid(&origin->commit->object.oid))
-		do_diff_cache(&parent->tree->object.oid, &diff_opts);
+		do_diff_cache(get_commit_tree_oid(parent), &diff_opts);
 	else
-		diff_tree_oid(&parent->tree->object.oid,
-			      &origin->commit->tree->object.oid,
+		diff_tree_oid(get_commit_tree_oid(parent),
+			      get_commit_tree_oid(origin->commit),
 			      "", &diff_opts);
 	diffcore_std(&diff_opts);
 
@@ -615,17 +635,17 @@ static struct blame_origin *find_rename(struct commit *parent,
 	int i;
 
 	diff_setup(&diff_opts);
-	DIFF_OPT_SET(&diff_opts, RECURSIVE);
+	diff_opts.flags.recursive = 1;
 	diff_opts.detect_rename = DIFF_DETECT_RENAME;
 	diff_opts.output_format = DIFF_FORMAT_NO_OUTPUT;
 	diff_opts.single_follow = origin->path;
 	diff_setup_done(&diff_opts);
 
 	if (is_null_oid(&origin->commit->object.oid))
-		do_diff_cache(&parent->tree->object.oid, &diff_opts);
+		do_diff_cache(get_commit_tree_oid(parent), &diff_opts);
 	else
-		diff_tree_oid(&parent->tree->object.oid,
-			      &origin->commit->tree->object.oid,
+		diff_tree_oid(get_commit_tree_oid(parent),
+			      get_commit_tree_oid(origin->commit),
 			      "", &diff_opts);
 	diffcore_std(&diff_opts);
 
@@ -998,28 +1018,29 @@ unsigned blame_entry_score(struct blame_scoreboard *sb, struct blame_entry *e)
 }
 
 /*
- * best_so_far[] and this[] are both a split of an existing blame_entry
- * that passes blame to the parent.  Maintain best_so_far the best split
- * so far, by comparing this and best_so_far and copying this into
+ * best_so_far[] and potential[] are both a split of an existing blame_entry
+ * that passes blame to the parent.  Maintain best_so_far the best split so
+ * far, by comparing potential and best_so_far and copying potential into
  * bst_so_far as needed.
  */
 static void copy_split_if_better(struct blame_scoreboard *sb,
 				 struct blame_entry *best_so_far,
-				 struct blame_entry *this)
+				 struct blame_entry *potential)
 {
 	int i;
 
-	if (!this[1].suspect)
+	if (!potential[1].suspect)
 		return;
 	if (best_so_far[1].suspect) {
-		if (blame_entry_score(sb, &this[1]) < blame_entry_score(sb, &best_so_far[1]))
+		if (blame_entry_score(sb, &potential[1]) <
+		    blame_entry_score(sb, &best_so_far[1]))
 			return;
 	}
 
 	for (i = 0; i < 3; i++)
-		blame_origin_incref(this[i].suspect);
+		blame_origin_incref(potential[i].suspect);
 	decref_split(best_so_far);
-	memcpy(best_so_far, this, sizeof(struct blame_entry [3]));
+	memcpy(best_so_far, potential, sizeof(struct blame_entry[3]));
 }
 
 /*
@@ -1046,12 +1067,12 @@ static void handle_split(struct blame_scoreboard *sb,
 	if (ent->num_lines <= tlno)
 		return;
 	if (tlno < same) {
-		struct blame_entry this[3];
+		struct blame_entry potential[3];
 		tlno += ent->s_lno;
 		same += ent->s_lno;
-		split_overlap(this, ent, tlno, plno, same, parent);
-		copy_split_if_better(sb, split, this);
-		decref_split(this);
+		split_overlap(potential, ent, tlno, plno, same, parent);
+		copy_split_if_better(sb, split, potential);
+		decref_split(potential);
 	}
 }
 
@@ -1238,7 +1259,7 @@ static void find_copy_in_parent(struct blame_scoreboard *sb,
 		return; /* nothing remains for this target */
 
 	diff_setup(&diff_opts);
-	DIFF_OPT_SET(&diff_opts, RECURSIVE);
+	diff_opts.flags.recursive = 1;
 	diff_opts.output_format = DIFF_FORMAT_NO_OUTPUT;
 
 	diff_setup_done(&diff_opts);
@@ -1253,16 +1274,16 @@ static void find_copy_in_parent(struct blame_scoreboard *sb,
 	if ((opt & PICKAXE_BLAME_COPY_HARDEST)
 	    || ((opt & PICKAXE_BLAME_COPY_HARDER)
 		&& (!porigin || strcmp(target->path, porigin->path))))
-		DIFF_OPT_SET(&diff_opts, FIND_COPIES_HARDER);
+		diff_opts.flags.find_copies_harder = 1;
 
 	if (is_null_oid(&target->commit->object.oid))
-		do_diff_cache(&parent->tree->object.oid, &diff_opts);
+		do_diff_cache(get_commit_tree_oid(parent), &diff_opts);
 	else
-		diff_tree_oid(&parent->tree->object.oid,
-			      &target->commit->tree->object.oid,
+		diff_tree_oid(get_commit_tree_oid(parent),
+			      get_commit_tree_oid(target->commit),
 			      "", &diff_opts);
 
-	if (!DIFF_OPT_TST(&diff_opts, FIND_COPIES_HARDER))
+	if (!diff_opts.flags.find_copies_harder)
 		diffcore_std(&diff_opts);
 
 	do {
@@ -1273,7 +1294,7 @@ static void find_copy_in_parent(struct blame_scoreboard *sb,
 			struct diff_filepair *p = diff_queued_diff.queue[i];
 			struct blame_origin *norigin;
 			mmfile_t file_p;
-			struct blame_entry this[3];
+			struct blame_entry potential[3];
 
 			if (!DIFF_FILE_VALID(p->one))
 				continue; /* does not exist in parent */
@@ -1292,10 +1313,10 @@ static void find_copy_in_parent(struct blame_scoreboard *sb,
 
 			for (j = 0; j < num_ents; j++) {
 				find_copy_in_blob(sb, blame_list[j].ent,
-						  norigin, this, &file_p);
+						  norigin, potential, &file_p);
 				copy_split_if_better(sb, blame_list[j].split,
-						     this);
-				decref_split(this);
+						     potential);
+				decref_split(potential);
 			}
 			blame_origin_decref(norigin);
 		}
@@ -1551,7 +1572,7 @@ void assign_blame(struct blame_scoreboard *sb, int opt)
 
 	while (commit) {
 		struct blame_entry *ent;
-		struct blame_origin *suspect = commit->util;
+		struct blame_origin *suspect = get_blame_suspects(commit);
 
 		/* find one suspect to break down */
 		while (suspect && !suspect->suspects)
@@ -1689,7 +1710,7 @@ static struct commit *dwim_reverse_initial(struct rev_info *revs,
 		return NULL;
 
 	/* Do we have HEAD? */
-	if (!resolve_ref_unsafe("HEAD", RESOLVE_REF_READING, head_oid.hash, NULL))
+	if (!resolve_ref_unsafe("HEAD", RESOLVE_REF_READING, &head_oid, NULL))
 		return NULL;
 	head_commit = lookup_commit_reference_gently(&head_oid, 1);
 	if (!head_commit)
@@ -1753,6 +1774,8 @@ void setup_scoreboard(struct blame_scoreboard *sb, const char *path, struct blam
 	struct commit *final_commit = NULL;
 	enum object_type type;
 
+	init_blame_suspects(&blame_suspects);
+
 	if (sb->reverse && sb->contents_from)
 		die(_("--contents and --reverse do not blend well."));
 
@@ -1807,7 +1830,7 @@ void setup_scoreboard(struct blame_scoreboard *sb, const char *path, struct blam
 			l->item = c;
 			if (add_decoration(&sb->revs->children,
 					   &c->parents->item->object, l))
-				die("BUG: not unique item in first-parent chain");
+				BUG("not unique item in first-parent chain");
 			c = c->parents->item;
 		}
 
@@ -1816,7 +1839,7 @@ void setup_scoreboard(struct blame_scoreboard *sb, const char *path, struct blam
 	}
 
 	if (is_null_oid(&sb->final->object.oid)) {
-		o = sb->final->util;
+		o = get_blame_suspects(sb->final);
 		sb->final_buf = xmemdupz(o->file.ptr, o->file.size);
 		sb->final_buf_size = o->file.size;
 	}
@@ -1825,13 +1848,13 @@ void setup_scoreboard(struct blame_scoreboard *sb, const char *path, struct blam
 		if (fill_blob_sha1_and_mode(o))
 			die(_("no such path %s in %s"), path, final_commit_name);
 
-		if (DIFF_OPT_TST(&sb->revs->diffopt, ALLOW_TEXTCONV) &&
+		if (sb->revs->diffopt.flags.allow_textconv &&
 		    textconv_object(path, o->mode, &o->blob_oid, 1, (char **) &sb->final_buf,
 				    &sb->final_buf_size))
 			;
 		else
-			sb->final_buf = read_sha1_file(o->blob_oid.hash, &type,
-						       &sb->final_buf_size);
+			sb->final_buf = read_object_file(&o->blob_oid, &type,
+							 &sb->final_buf_size);
 
 		if (!sb->final_buf)
 			die(_("cannot read blob %s for path %s"),

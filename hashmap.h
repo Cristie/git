@@ -18,75 +18,71 @@
  *
  * #define COMPARE_VALUE 1
  *
- * static int long2string_cmp(const struct long2string *e1,
+ * static int long2string_cmp(const void *hashmap_cmp_fn_data,
+ *                            const struct long2string *e1,
  *                            const struct long2string *e2,
- *                            const void *keydata, const void *userdata)
+ *                            const void *keydata)
  * {
- *     char *string = keydata;
- *     unsigned *flags = (unsigned*)userdata;
+ *     const char *string = keydata;
+ *     unsigned flags = *(unsigned *)hashmap_cmp_fn_data;
  *
  *     if (flags & COMPARE_VALUE)
- *         return !(e1->key == e2->key) || (keydata ?
- *                  strcmp(e1->value, keydata) : strcmp(e1->value, e2->value));
+ *         return e1->key != e2->key ||
+ *                  strcmp(e1->value, string ? string : e2->value);
  *     else
- *         return !(e1->key == e2->key);
+ *         return e1->key != e2->key;
  * }
  *
  * int main(int argc, char **argv)
  * {
  *     long key;
- *     char *value, *action;
- *
- *     unsigned flags = ALLOW_DUPLICATE_KEYS;
+ *     char value[255], action[32];
+ *     unsigned flags = 0;
  *
  *     hashmap_init(&map, (hashmap_cmp_fn) long2string_cmp, &flags, 0);
  *
- *     while (scanf("%s %l %s", action, key, value)) {
+ *     while (scanf("%s %ld %s", action, &key, value)) {
  *
  *         if (!strcmp("add", action)) {
  *             struct long2string *e;
- *             e = malloc(sizeof(struct long2string) + strlen(value));
+ *             FLEX_ALLOC_STR(e, value, value);
  *             hashmap_entry_init(e, memhash(&key, sizeof(long)));
  *             e->key = key;
- *             memcpy(e->value, value, strlen(value));
  *             hashmap_add(&map, e);
  *         }
  *
  *         if (!strcmp("print_all_by_key", action)) {
- *             flags &= ~COMPARE_VALUE;
- *
- *             struct long2string k;
+ *             struct long2string k, *e;
  *             hashmap_entry_init(&k, memhash(&key, sizeof(long)));
  *             k.key = key;
  *
- *             struct long2string *e = hashmap_get(&map, &k, NULL);
+ *             flags &= ~COMPARE_VALUE;
+ *             e = hashmap_get(&map, &k, NULL);
  *             if (e) {
- *                 printf("first: %l %s\n", e->key, e->value);
- *                 while (e = hashmap_get_next(&map, e))
- *                     printf("found more: %l %s\n", e->key, e->value);
+ *                 printf("first: %ld %s\n", e->key, e->value);
+ *                 while ((e = hashmap_get_next(&map, e)))
+ *                     printf("found more: %ld %s\n", e->key, e->value);
  *             }
  *         }
  *
  *         if (!strcmp("has_exact_match", action)) {
- *             flags |= COMPARE_VALUE;
- *
  *             struct long2string *e;
- *             e = malloc(sizeof(struct long2string) + strlen(value));
+ *             FLEX_ALLOC_STR(e, value, value);
  *             hashmap_entry_init(e, memhash(&key, sizeof(long)));
  *             e->key = key;
- *             memcpy(e->value, value, strlen(value));
  *
- *             printf("%s found\n", hashmap_get(&map, e, NULL) ? "" : "not");
+ *             flags |= COMPARE_VALUE;
+ *             printf("%sfound\n", hashmap_get(&map, e, NULL) ? "" : "not ");
+ *             free(e);
  *         }
  *
  *         if (!strcmp("has_exact_match_no_heap_alloc", action)) {
+ *             struct long2string k;
+ *             hashmap_entry_init(&k, memhash(&key, sizeof(long)));
+ *             k.key = key;
+ *
  *             flags |= COMPARE_VALUE;
- *
- *             struct long2string e;
- *             hashmap_entry_init(e, memhash(&key, sizeof(long)));
- *             e.key = key;
- *
- *             printf("%s found\n", hashmap_get(&map, e, value) ? "" : "not");
+ *             printf("%sfound\n", hashmap_get(&map, &k, value) ? "" : "not ");
  *         }
  *
  *         if (!strcmp("end", action)) {
@@ -94,6 +90,8 @@
  *             break;
  *         }
  *     }
+ *
+ *     return 0;
  * }
  */
 
@@ -183,7 +181,7 @@ struct hashmap {
 	const void *cmpfn_data;
 
 	/* total number of entries (0 means the hashmap is empty) */
-	unsigned int size;
+	unsigned int private_size; /* use hashmap_get_size() */
 
 	/*
 	 * tablesize is the allocated size of the hash table. A non-0 value
@@ -196,8 +194,7 @@ struct hashmap {
 	unsigned int grow_at;
 	unsigned int shrink_at;
 
-	/* See `hashmap_disallow_rehash`. */
-	unsigned disallow_rehash : 1;
+	unsigned int do_count_items : 1;
 };
 
 /* hashmap functions */
@@ -250,6 +247,18 @@ static inline void hashmap_entry_init(void *entry, unsigned int hash)
 	struct hashmap_entry *e = entry;
 	e->hash = hash;
 	e->next = NULL;
+}
+
+/*
+ * Return the number of items in the map.
+ */
+static inline unsigned int hashmap_get_size(struct hashmap *map)
+{
+	if (map->do_count_items)
+		return map->private_size;
+
+	BUG("hashmap_get_size: size not set");
+	return 0;
 }
 
 /*
@@ -345,24 +354,6 @@ extern void *hashmap_remove(struct hashmap *map, const void *key,
 int hashmap_bucket(const struct hashmap *map, unsigned int hash);
 
 /*
- * Disallow/allow rehashing of the hashmap.
- * This is useful if the caller knows that the hashmap needs multi-threaded
- * access.  The caller is still required to guard/lock searches and inserts
- * in a manner appropriate to their usage.  This simply prevents the table
- * from being unexpectedly re-mapped.
- *
- * It is up to the caller to ensure that the hashmap is initialized to a
- * reasonable size to prevent poor performance.
- *
- * A call to allow rehashing does not force a rehash; that might happen
- * with the next insert or delete.
- */
-static inline void hashmap_disallow_rehash(struct hashmap *map, unsigned value)
-{
-	map->disallow_rehash = value;
-}
-
-/*
  * Used to iterate over all entries of a hashmap. Note that it is
  * not safe to add or remove entries to the hashmap while
  * iterating.
@@ -385,6 +376,42 @@ static inline void *hashmap_iter_first(struct hashmap *map,
 {
 	hashmap_iter_init(map, iter);
 	return hashmap_iter_next(iter);
+}
+
+/*
+ * Disable item counting and automatic rehashing when adding/removing items.
+ *
+ * Normally, the hashmap keeps track of the number of items in the map
+ * and uses it to dynamically resize it.  This (both the counting and
+ * the resizing) can cause problems when the map is being used by
+ * threaded callers (because the hashmap code does not know about the
+ * locking strategy used by the threaded callers and therefore, does
+ * not know how to protect the "private_size" counter).
+ */
+static inline void hashmap_disable_item_counting(struct hashmap *map)
+{
+	map->do_count_items = 0;
+}
+
+/*
+ * Re-enable item couting when adding/removing items.
+ * If counting is currently disabled, it will force count them.
+ * It WILL NOT automatically rehash them.
+ */
+static inline void hashmap_enable_item_counting(struct hashmap *map)
+{
+	unsigned int n = 0;
+	struct hashmap_iter iter;
+
+	if (map->do_count_items)
+		return;
+
+	hashmap_iter_init(map, &iter);
+	while (hashmap_iter_next(&iter))
+		n++;
+
+	map->do_count_items = 1;
+	map->private_size = n;
 }
 
 /* String interning */

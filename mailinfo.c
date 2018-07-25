@@ -149,16 +149,14 @@ static void handle_from(struct mailinfo *mi, const struct strbuf *from)
 	at = strchr(f.buf, '@');
 	if (!at) {
 		parse_bogus_from(mi, from);
-		return;
+		goto out;
 	}
 
 	/*
 	 * If we already have one email, don't take any confusing lines
 	 */
-	if (mi->email.len && strchr(at + 1, '@')) {
-		strbuf_release(&f);
-		return;
-	}
+	if (mi->email.len && strchr(at + 1, '@'))
+		goto out;
 
 	/* Pick up the string around '@', possibly delimited with <>
 	 * pair; that is the email part.
@@ -198,6 +196,7 @@ static void handle_from(struct mailinfo *mi, const struct strbuf *from)
 	}
 
 	get_sane_name(&mi->name, &f, &mi->email);
+out:
 	strbuf_release(&f);
 }
 
@@ -368,11 +367,16 @@ static struct strbuf *decode_q_segment(const struct strbuf *q_seg, int rfc2047)
 
 	while ((c = *in++) != 0) {
 		if (c == '=') {
-			int d = *in++;
+			int ch, d = *in;
 			if (d == '\n' || !d)
 				break; /* drop trailing newline */
-			strbuf_addch(out, (hexval(d) << 4) | hexval(*in++));
-			continue;
+			ch = hex2chr(in);
+			if (ch >= 0) {
+				strbuf_addch(out, ch);
+				in += 2;
+				continue;
+			}
+			/* garbage -- fall through */
 		}
 		if (rfc2047 && c == '_') /* rfc2047 4.2 (2) */
 			c = 0x20;
@@ -712,7 +716,7 @@ static void flush_inbody_header_accum(struct mailinfo *mi)
 	if (!mi->inbody_header_accum.len)
 		return;
 	if (!check_header(mi, &mi->inbody_header_accum, mi->s_hdr_data, 0))
-		die("BUG: inbody_header_accum, if not empty, must always contain a valid in-body header");
+		BUG("inbody_header_accum, if not empty, must always contain a valid in-body header");
 	strbuf_reset(&mi->inbody_header_accum);
 }
 
@@ -823,6 +827,7 @@ static void handle_filter(struct mailinfo *mi, struct strbuf *line)
 		if (!handle_commit_msg(mi, line))
 			break;
 		mi->filter_stage++;
+		/* fallthrough */
 	case 1:
 		handle_patch(mi, line);
 		break;
@@ -929,6 +934,7 @@ again:
 			error("Detected mismatched boundaries, can't recover");
 			mi->input_error = -1;
 			mi->content_top = mi->content;
+			strbuf_release(&newline);
 			return 0;
 		}
 		handle_filter(mi, &newline);
@@ -1161,11 +1167,13 @@ void clear_mailinfo(struct mailinfo *mi)
 	strbuf_release(&mi->inbody_header_accum);
 	free(mi->message_id);
 
-	for (i = 0; mi->p_hdr_data[i]; i++)
-		strbuf_release(mi->p_hdr_data[i]);
+	if (mi->p_hdr_data)
+		for (i = 0; mi->p_hdr_data[i]; i++)
+			strbuf_release(mi->p_hdr_data[i]);
 	free(mi->p_hdr_data);
-	for (i = 0; mi->s_hdr_data[i]; i++)
-		strbuf_release(mi->s_hdr_data[i]);
+	if (mi->s_hdr_data)
+		for (i = 0; mi->s_hdr_data[i]; i++)
+			strbuf_release(mi->s_hdr_data[i]);
 	free(mi->s_hdr_data);
 
 	while (mi->content < mi->content_top) {

@@ -200,7 +200,7 @@ static const char *parse_cmd_update(struct ref_transaction *transaction,
 		die("update %s: extra input: %s", refname, next);
 
 	if (ref_transaction_update(transaction, refname,
-				   new_oid.hash, have_old ? old_oid.hash : NULL,
+				   &new_oid, have_old ? &old_oid : NULL,
 				   update_flags | create_reflog_flag,
 				   msg, &err))
 		die("%s", err.buf);
@@ -232,7 +232,7 @@ static const char *parse_cmd_create(struct ref_transaction *transaction,
 	if (*next != line_termination)
 		die("create %s: extra input: %s", refname, next);
 
-	if (ref_transaction_create(transaction, refname, new_oid.hash,
+	if (ref_transaction_create(transaction, refname, &new_oid,
 				   update_flags | create_reflog_flag,
 				   msg, &err))
 		die("%s", err.buf);
@@ -269,7 +269,7 @@ static const char *parse_cmd_delete(struct ref_transaction *transaction,
 		die("delete %s: extra input: %s", refname, next);
 
 	if (ref_transaction_delete(transaction, refname,
-				   have_old ? old_oid.hash : NULL,
+				   have_old ? &old_oid : NULL,
 				   update_flags, msg, &err))
 		die("%s", err.buf);
 
@@ -298,7 +298,7 @@ static const char *parse_cmd_verify(struct ref_transaction *transaction,
 	if (*next != line_termination)
 		die("verify %s: extra input: %s", refname, next);
 
-	if (ref_transaction_verify(transaction, refname, old_oid.hash,
+	if (ref_transaction_verify(transaction, refname, &old_oid,
 				   update_flags, &err))
 		die("%s", err.buf);
 
@@ -311,11 +311,12 @@ static const char *parse_cmd_verify(struct ref_transaction *transaction,
 
 static const char *parse_cmd_option(struct strbuf *input, const char *next)
 {
-	if (!strncmp(next, "no-deref", 8) && next[8] == line_termination)
-		update_flags |= REF_NODEREF;
+	const char *rest;
+	if (skip_prefix(next, "no-deref", &rest) && *rest == line_termination)
+		update_flags |= REF_NO_DEREF;
 	else
 		die("option unknown: %s", next);
-	return next + 8;
+	return rest;
 }
 
 static void update_refs_stdin(struct ref_transaction *transaction)
@@ -332,16 +333,16 @@ static void update_refs_stdin(struct ref_transaction *transaction)
 			die("empty command in input");
 		else if (isspace(*next))
 			die("whitespace before command: %s", next);
-		else if (starts_with(next, "update "))
-			next = parse_cmd_update(transaction, &input, next + 7);
-		else if (starts_with(next, "create "))
-			next = parse_cmd_create(transaction, &input, next + 7);
-		else if (starts_with(next, "delete "))
-			next = parse_cmd_delete(transaction, &input, next + 7);
-		else if (starts_with(next, "verify "))
-			next = parse_cmd_verify(transaction, &input, next + 7);
-		else if (starts_with(next, "option "))
-			next = parse_cmd_option(&input, next + 7);
+		else if (skip_prefix(next, "update ", &next))
+			next = parse_cmd_update(transaction, &input, next);
+		else if (skip_prefix(next, "create ", &next))
+			next = parse_cmd_create(transaction, &input, next);
+		else if (skip_prefix(next, "delete ", &next))
+			next = parse_cmd_delete(transaction, &input, next);
+		else if (skip_prefix(next, "verify ", &next))
+			next = parse_cmd_verify(transaction, &input, next);
+		else if (skip_prefix(next, "option ", &next))
+			next = parse_cmd_option(&input, next);
 		else
 			die("unknown command: %s", next);
 
@@ -427,17 +428,17 @@ int cmd_update_ref(int argc, const char **argv, const char *prefix)
 	}
 
 	if (no_deref)
-		flags = REF_NODEREF;
+		flags = REF_NO_DEREF;
 	if (delete)
 		/*
 		 * For purposes of backwards compatibility, we treat
 		 * NULL_SHA1 as "don't care" here:
 		 */
 		return delete_ref(msg, refname,
-				  (oldval && !is_null_oid(&oldoid)) ? oldoid.hash : NULL,
+				  (oldval && !is_null_oid(&oldoid)) ? &oldoid : NULL,
 				  flags);
 	else
-		return update_ref(msg, refname, oid.hash, oldval ? oldoid.hash : NULL,
+		return update_ref(msg, refname, &oid, oldval ? &oldoid : NULL,
 				  flags | create_reflog_flag,
 				  UPDATE_REFS_DIE_ON_ERR);
 }

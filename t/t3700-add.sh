@@ -187,7 +187,7 @@ test_expect_success 'git add --refresh with pathspec' '
 	echo >foo && echo >bar && echo >baz &&
 	git add foo bar baz && H=$(git rev-parse :foo) && git rm -f foo &&
 	echo "100644 $H 3	foo" | git update-index --index-info &&
-	test-chmtime -60 bar baz &&
+	test-tool chmtime -60 bar baz &&
 	>expect &&
 	git add --refresh bar >actual &&
 	test_cmp expect actual &&
@@ -331,9 +331,8 @@ test_expect_success 'git add --dry-run --ignore-missing of non-existing file out
 	test_i18ncmp expect.err actual.err
 '
 
-test_expect_success 'git add empty string should invoke warning' '
-	git add "" 2>output &&
-	test_i18ngrep "warning: empty strings" output
+test_expect_success 'git add empty string should fail' '
+	test_must_fail git add ""
 '
 
 test_expect_success 'git add --chmod=[+-]x stages correctly' '

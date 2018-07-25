@@ -697,7 +697,43 @@ test_expect_success 'merge --no-ff --edit' '
 	git cat-file commit HEAD >raw &&
 	grep "work done on the side branch" raw &&
 	sed "1,/^$/d" >actual raw &&
-	test_cmp actual expected
+	test_cmp expected actual
+'
+
+test_expect_success 'merge annotated/signed tag w/o tracking' '
+	test_when_finished "rm -rf dst; git tag -d anno1" &&
+	git tag -a -m "anno c1" anno1 c1 &&
+	git init dst &&
+	git rev-parse c1 >dst/expect &&
+	(
+		# c0 fast-forwards to c1 but because this repository
+		# is not a "downstream" whose refs/tags follows along
+		# tag from the "upstream", this pull defaults to --no-ff
+		cd dst &&
+		git pull .. c0 &&
+		git pull .. anno1 &&
+		git rev-parse HEAD^2 >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'merge annotated/signed tag w/ tracking' '
+	test_when_finished "rm -rf dst; git tag -d anno1" &&
+	git tag -a -m "anno c1" anno1 c1 &&
+	git init dst &&
+	git rev-parse c1 >dst/expect &&
+	(
+		# c0 fast-forwards to c1 and because this repository
+		# is a "downstream" whose refs/tags follows along
+		# tag from the "upstream", this pull defaults to --ff
+		cd dst &&
+		git remote add origin .. &&
+		git pull origin c0 &&
+		git fetch origin &&
+		git merge anno1 &&
+		git rev-parse HEAD >actual &&
+		test_cmp expect actual
+	)
 '
 
 test_expect_success GPG 'merge --ff-only tag' '
@@ -709,7 +745,7 @@ test_expect_success GPG 'merge --ff-only tag' '
 	git merge --ff-only signed &&
 	git rev-parse signed^0 >expect &&
 	git rev-parse HEAD >actual &&
-	test_cmp actual expect
+	test_cmp expect actual
 '
 
 test_expect_success GPG 'merge --no-edit tag should skip editor' '
@@ -718,10 +754,10 @@ test_expect_success GPG 'merge --no-edit tag should skip editor' '
 	git tag -f -s -m "A newer commit" signed &&
 	git reset --hard c0 &&
 
-	EDITOR=false git merge --no-edit signed &&
+	EDITOR=false git merge --no-edit --no-ff signed &&
 	git rev-parse signed^0 >expect &&
 	git rev-parse HEAD^2 >actual &&
-	test_cmp actual expect
+	test_cmp expect actual
 '
 
 test_expect_success 'set up mod-256 conflict scenario' '

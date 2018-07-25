@@ -1,10 +1,12 @@
 #include "cache.h"
 #include "config.h"
+#include "object-store.h"
 #include "xdiff-interface.h"
 #include "xdiff/xtypes.h"
 #include "xdiff/xdiffi.h"
 #include "xdiff/xemit.h"
 #include "xdiff/xmacros.h"
+#include "xdiff/xutils.h"
 
 struct xdiff_emit_state {
 	xdiff_emit_consume_fn consume;
@@ -190,7 +192,7 @@ void read_mmblob(mmfile_t *ptr, const struct object_id *oid)
 		return;
 	}
 
-	ptr->ptr = read_sha1_file(oid->hash, &type, &size);
+	ptr->ptr = read_object_file(oid, &type, &size);
 	if (!ptr->ptr || type != OBJ_BLOB)
 		die("unable to read blob object %s", oid_to_hex(oid));
 	ptr->size = size;
@@ -294,6 +296,17 @@ void xdiff_clear_find_func(xdemitconf_t *xecfg)
 		xecfg->find_func = NULL;
 		xecfg->find_func_priv = NULL;
 	}
+}
+
+unsigned long xdiff_hash_string(const char *s, size_t len, long flags)
+{
+	return xdl_hash_record(&s, s + len, flags);
+}
+
+int xdiff_compare_lines(const char *l1, long s1,
+			const char *l2, long s2, long flags)
+{
+	return xdl_recmatch(l1, s1, l2, s2, flags);
 }
 
 int git_xmerge_style = -1;

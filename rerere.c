@@ -9,6 +9,7 @@
 #include "ll-merge.h"
 #include "attr.h"
 #include "pathspec.h"
+#include "object-store.h"
 #include "sha1-lookup.h"
 
 #define RESOLVED 0
@@ -159,8 +160,8 @@ static struct rerere_dir *find_rerere_dir(const char *hex)
 		ALLOC_GROW(rerere_dir, rerere_dir_nr + 1, rerere_dir_alloc);
 		/* ... and add it in. */
 		rerere_dir_nr++;
-		memmove(rerere_dir + pos + 1, rerere_dir + pos,
-			(rerere_dir_nr - pos - 1) * sizeof(*rerere_dir));
+		MOVE_ARRAY(rerere_dir + pos + 1, rerere_dir + pos,
+			   rerere_dir_nr - pos - 1);
 		rerere_dir[pos] = rr_dir;
 		scan_rerere_dir(rr_dir);
 	}
@@ -200,7 +201,7 @@ static struct rerere_id *new_rerere_id(unsigned char *sha1)
 static void read_rr(struct string_list *rr)
 {
 	struct strbuf buf = STRBUF_INIT;
-	FILE *in = fopen_or_warn(git_path_merge_rr(), "r");
+	FILE *in = fopen_or_warn(git_path_merge_rr(the_repository), "r");
 
 	if (!in)
 		return;
@@ -258,7 +259,7 @@ static int write_rr(struct string_list *rr, int out_fd)
 				    rerere_id_hex(id),
 				    rr->items[i].string, 0);
 
-		if (write_in_full(out_fd, buf.buf, buf.len) != buf.len)
+		if (write_in_full(out_fd, buf.buf, buf.len) < 0)
 			die("unable to write rerere record");
 
 		strbuf_release(&buf);
@@ -703,10 +704,9 @@ out:
 	return ret;
 }
 
-static struct lock_file index_lock;
-
 static void update_paths(struct string_list *update)
 {
+	struct lock_file index_lock = LOCK_INIT;
 	int i;
 
 	hold_locked_index(&index_lock, LOCK_DIE_ON_ERROR);
@@ -719,11 +719,9 @@ static void update_paths(struct string_list *update)
 			item->string);
 	}
 
-	if (active_cache_changed) {
-		if (write_locked_index(&the_index, &index_lock, COMMIT_LOCK))
-			die("Unable to write new index file");
-	} else
-		rollback_lock_file(&index_lock);
+	if (write_locked_index(&the_index, &index_lock,
+			       COMMIT_LOCK | SKIP_IF_UNCHANGED))
+		die("Unable to write new index file");
 }
 
 static void remove_variant(struct rerere_id *id)
@@ -898,7 +896,8 @@ int setup_rerere(struct string_list *merge_rr, int flags)
 	if (flags & RERERE_READONLY)
 		fd = 0;
 	else
-		fd = hold_lock_file_for_update(&write_lock, git_path_merge_rr(),
+		fd = hold_lock_file_for_update(&write_lock,
+					       git_path_merge_rr(the_repository),
 					       LOCK_DIE_ON_ERROR);
 	read_rr(merge_rr);
 	return fd;
@@ -981,8 +980,8 @@ static int handle_cache(const char *path, unsigned char *sha1, const char *outpu
 			break;
 		i = ce_stage(ce) - 1;
 		if (!mmfile[i].ptr) {
-			mmfile[i].ptr = read_sha1_file(ce->oid.hash, &type,
-						       &size);
+			mmfile[i].ptr = read_object_file(&ce->oid, &type,
+							 &size);
 			mmfile[i].size = size;
 		}
 	}
@@ -1248,6 +1247,6 @@ void rerere_clear(struct string_list *merge_rr)
 			rmdir(rerere_path(id, NULL));
 		}
 	}
-	unlink_or_warn(git_path_merge_rr());
+	unlink_or_warn(git_path_merge_rr(the_repository));
 	rollback_lock_file(&write_lock);
 }

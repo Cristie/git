@@ -1,6 +1,7 @@
 #include "cache.h"
 #include "lockfile.h"
 #include "bundle.h"
+#include "object-store.h"
 #include "object.h"
 #include "commit.h"
 #include "diff.h"
@@ -134,7 +135,6 @@ int verify_bundle(struct bundle_header *header, int verbose)
 	struct ref_list *p = &header->prerequisites;
 	struct rev_info revs;
 	const char *argv[] = {NULL, "--all", NULL};
-	struct object_array refs;
 	struct commit *commit;
 	int i, ret = 0, req_nr;
 	const char *message = _("Repository lacks these prerequisite commits:");
@@ -157,9 +157,6 @@ int verify_bundle(struct bundle_header *header, int verbose)
 	req_nr = revs.pending.nr;
 	setup_revisions(2, argv, &revs, NULL);
 
-	refs = revs.pending;
-	revs.leak_pending = 1;
-
 	if (prepare_revision_walk(&revs))
 		die(_("revision walk setup failed"));
 
@@ -168,16 +165,24 @@ int verify_bundle(struct bundle_header *header, int verbose)
 		if (commit->object.flags & PREREQ_MARK)
 			i--;
 
-	for (i = 0; i < req_nr; i++)
-		if (!(refs.objects[i].item->flags & SHOWN)) {
-			if (++ret == 1)
-				error("%s", message);
-			error("%s %s", oid_to_hex(&refs.objects[i].item->oid),
-				refs.objects[i].name);
-		}
+	for (i = 0; i < p->nr; i++) {
+		struct ref_list_entry *e = p->list + i;
+		struct object *o = parse_object(&e->oid);
+		assert(o); /* otherwise we'd have returned early */
+		if (o->flags & SHOWN)
+			continue;
+		if (++ret == 1)
+			error("%s", message);
+		error("%s %s", oid_to_hex(&e->oid), e->name);
+	}
 
-	clear_commit_marks_for_object_array(&refs, ALL_REV_FLAGS);
-	free(refs.objects);
+	/* Clean up objects used, as they will be reused. */
+	for (i = 0; i < p->nr; i++) {
+		struct ref_list_entry *e = p->list + i;
+		commit = lookup_commit_reference_gently(&e->oid, 1);
+		if (commit)
+			clear_commit_marks(commit, ALL_REV_FLAGS);
+	}
 
 	if (verbose) {
 		struct ref_list *r;
@@ -218,7 +223,7 @@ static int is_tag_in_date_range(struct object *tag, struct rev_info *revs)
 	if (revs->max_age == -1 && revs->min_age == -1)
 		goto out;
 
-	buf = read_sha1_file(tag->oid.hash, &type, &size);
+	buf = read_object_file(&tag->oid, &type, &size);
 	if (!buf)
 		goto out;
 	line = memmem(buf, size, "\ntagger ", 8);
@@ -331,9 +336,9 @@ static int write_bundle_refs(int bundle_fd, struct rev_info *revs)
 
 		if (e->item->flags & UNINTERESTING)
 			continue;
-		if (dwim_ref(e->name, strlen(e->name), oid.hash, &ref) != 1)
+		if (dwim_ref(e->name, strlen(e->name), &oid, &ref) != 1)
 			goto skip_write_ref;
-		if (read_ref_full(e->name, RESOLVE_REF_READING, oid.hash, &flag))
+		if (read_ref_full(e->name, RESOLVE_REF_READING, &oid, &flag))
 			flag = 0;
 		display_ref = (flag & REF_ISSYMREF) ? e->name : ref;
 
@@ -405,7 +410,7 @@ static int write_bundle_refs(int bundle_fd, struct rev_info *revs)
 int create_bundle(struct bundle_header *header, const char *path,
 		  int argc, const char **argv)
 {
-	static struct lock_file lock;
+	struct lock_file lock = LOCK_INIT;
 	int bundle_fd = -1;
 	int bundle_to_stdout;
 	int ref_count = 0;

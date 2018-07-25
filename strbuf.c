@@ -1,5 +1,6 @@
 #include "cache.h"
 #include "refs.h"
+#include "string-list.h"
 #include "utf8.h"
 
 int starts_with(const char *str, const char *prefix)
@@ -9,6 +10,37 @@ int starts_with(const char *str, const char *prefix)
 			return 1;
 		else if (*str != *prefix)
 			return 0;
+}
+
+int istarts_with(const char *str, const char *prefix)
+{
+	for (; ; str++, prefix++)
+		if (!*prefix)
+			return 1;
+		else if (tolower(*str) != tolower(*prefix))
+			return 0;
+}
+
+int skip_to_optional_arg_default(const char *str, const char *prefix,
+				 const char **arg, const char *def)
+{
+	const char *p;
+
+	if (!skip_prefix(str, prefix, &p))
+		return 0;
+
+	if (!*p) {
+		if (arg)
+			*arg = def;
+		return 1;
+	}
+
+	if (*p != '=')
+		return 0;
+
+	if (arg)
+		*arg = p + 1;
+	return 1;
 }
 
 /*
@@ -73,9 +105,17 @@ void strbuf_trim(struct strbuf *sb)
 	strbuf_rtrim(sb);
 	strbuf_ltrim(sb);
 }
+
 void strbuf_rtrim(struct strbuf *sb)
 {
 	while (sb->len > 0 && isspace((unsigned char)sb->buf[sb->len - 1]))
+		sb->len--;
+	sb->buf[sb->len] = '\0';
+}
+
+void strbuf_trim_trailing_dir_sep(struct strbuf *sb)
+{
+	while (sb->len > 0 && is_dir_sep((unsigned char)sb->buf[sb->len - 1]))
 		sb->len--;
 	sb->buf[sb->len] = '\0';
 }
@@ -139,6 +179,21 @@ struct strbuf **strbuf_split_buf(const char *str, size_t slen,
 	ALLOC_GROW(ret, nr + 1, alloc); /* In case string was empty */
 	ret[nr] = NULL;
 	return ret;
+}
+
+void strbuf_add_separated_string_list(struct strbuf *str,
+				      const char *sep,
+				      struct string_list *slist)
+{
+	struct string_list_item *item;
+	int sep_needed = 0;
+
+	for_each_string_list_item(item, slist) {
+		if (sep_needed)
+			strbuf_addstr(str, sep);
+		strbuf_addstr(str, item->string);
+		sep_needed = 1;
+	}
 }
 
 void strbuf_list_free(struct strbuf **sbs)
@@ -279,12 +334,12 @@ void strbuf_vaddf(struct strbuf *sb, const char *fmt, va_list ap)
 	len = vsnprintf(sb->buf + sb->len, sb->alloc - sb->len, fmt, cp);
 	va_end(cp);
 	if (len < 0)
-		die("BUG: your vsnprintf is broken (returned %d)", len);
+		BUG("your vsnprintf is broken (returned %d)", len);
 	if (len > strbuf_avail(sb)) {
 		strbuf_grow(sb, len);
 		len = vsnprintf(sb->buf + sb->len, sb->alloc - sb->len, fmt, ap);
 		if (len > strbuf_avail(sb))
-			die("BUG: your vsnprintf is broken (insatiable)");
+			BUG("your vsnprintf is broken (insatiable)");
 	}
 	strbuf_setlen(sb, sb->len + len);
 }
@@ -386,12 +441,15 @@ ssize_t strbuf_read(struct strbuf *sb, int fd, size_t hint)
 
 ssize_t strbuf_read_once(struct strbuf *sb, int fd, size_t hint)
 {
+	size_t oldalloc = sb->alloc;
 	ssize_t cnt;
 
 	strbuf_grow(sb, hint ? hint : 8192);
 	cnt = xread(fd, sb->buf + sb->len, sb->alloc - sb->len - 1);
 	if (cnt > 0)
 		strbuf_setlen(sb, sb->len + cnt);
+	else if (oldalloc == 0)
+		strbuf_release(sb);
 	return cnt;
 }
 
@@ -587,14 +645,18 @@ ssize_t strbuf_read_file(struct strbuf *sb, const char *path, size_t hint)
 {
 	int fd;
 	ssize_t len;
+	int saved_errno;
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return -1;
 	len = strbuf_read(sb, fd, hint);
+	saved_errno = errno;
 	close(fd);
-	if (len < 0)
+	if (len < 0) {
+		errno = saved_errno;
 		return -1;
+	}
 
 	return len;
 }
@@ -658,7 +720,7 @@ static void strbuf_add_urlencode(struct strbuf *sb, const char *s, size_t len,
 		    (!reserved && is_rfc3986_reserved(ch)))
 			strbuf_addch(sb, ch);
 		else
-			strbuf_addf(sb, "%%%02x", ch);
+			strbuf_addf(sb, "%%%02x", (unsigned char)ch);
 	}
 }
 
@@ -756,7 +818,18 @@ char *xstrdup_tolower(const char *string)
 	result = xmallocz(len);
 	for (i = 0; i < len; i++)
 		result[i] = tolower(string[i]);
-	result[i] = '\0';
+	return result;
+}
+
+char *xstrdup_toupper(const char *string)
+{
+	char *result;
+	size_t len, i;
+
+	len = strlen(string);
+	result = xmallocz(len);
+	for (i = 0; i < len; i++)
+		result[i] = toupper(string[i]);
 	return result;
 }
 
@@ -844,12 +917,12 @@ void strbuf_addftime(struct strbuf *sb, const char *fmt, const struct tm *tm,
 	strbuf_setlen(sb, sb->len + len);
 }
 
-void strbuf_add_unique_abbrev(struct strbuf *sb, const unsigned char *sha1,
+void strbuf_add_unique_abbrev(struct strbuf *sb, const struct object_id *oid,
 			      int abbrev_len)
 {
 	int r;
 	strbuf_grow(sb, GIT_SHA1_HEXSZ + 1);
-	r = find_unique_abbrev_r(sb->buf + sb->len, sha1, abbrev_len);
+	r = find_unique_abbrev_r(sb->buf + sb->len, oid, abbrev_len);
 	strbuf_setlen(sb, sb->len + r);
 }
 

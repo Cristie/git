@@ -65,7 +65,7 @@ test_expect_success setup '
 test_expect_success "checkout from non-existing branch" '
 
 	git checkout -b delete-me master &&
-	rm .git/refs/heads/delete-me &&
+	git update-ref -d --no-deref refs/heads/delete-me &&
 	test refs/heads/delete-me = "$(git symbolic-ref HEAD)" &&
 	git checkout master &&
 	test refs/heads/master = "$(git symbolic-ref HEAD)"
@@ -187,7 +187,7 @@ test_expect_success 'format of merge conflict from checkout -m' '
 	d
 	>>>>>>> local
 	EOF
-	test_cmp two expect
+	test_cmp expect two
 '
 
 test_expect_success 'checkout --merge --conflict=diff3 <branch>' '
@@ -213,7 +213,7 @@ test_expect_success 'checkout --merge --conflict=diff3 <branch>' '
 	d
 	>>>>>>> local
 	EOF
-	test_cmp two expect
+	test_cmp expect two
 '
 
 test_expect_success 'switch to another branch while carrying a deletion' '

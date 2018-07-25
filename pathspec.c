@@ -198,7 +198,7 @@ static void parse_pathspec_attr_match(struct pathspec_item *item, const char *va
 	}
 
 	if (item->attr_check->nr != item->attr_match_nr)
-		die("BUG: should have same number of entries");
+		BUG("should have same number of entries");
 
 	string_list_clear(&list, 0);
 }
@@ -422,7 +422,7 @@ static void init_pathspec_item(struct pathspec_item *item, unsigned flags,
 
 	if (pathspec_prefix >= 0 &&
 	    (prefixlen || (prefix && *prefix)))
-		die("BUG: 'prefix' magic is supposed to be used at worktree's root");
+		BUG("'prefix' magic is supposed to be used at worktree's root");
 
 	if ((magic & PATHSPEC_LITERAL) && (magic & PATHSPEC_GLOB))
 		die(_("%s: 'literal' and 'glob' are incompatible"), elt);
@@ -486,7 +486,7 @@ static void init_pathspec_item(struct pathspec_item *item, unsigned flags,
 	/* sanity checks, pathspec matchers assume these are sane */
 	if (item->nowildcard_len > item->len ||
 	    item->prefix         > item->len) {
-		die ("BUG: error initializing pathspec_item");
+		BUG("error initializing pathspec_item");
 	}
 }
 
@@ -526,17 +526,13 @@ static void NORETURN unsupported_magic(const char *pattern,
 	    pattern, sb.buf);
 }
 
-/*
- * Given command line arguments and a prefix, convert the input to
- * pathspec. die() if any magic in magic_mask is used.
- */
 void parse_pathspec(struct pathspec *pathspec,
 		    unsigned magic_mask, unsigned flags,
 		    const char *prefix, const char **argv)
 {
 	struct pathspec_item *item;
 	const char *entry = argv ? *argv : NULL;
-	int i, n, prefixlen, warn_empty_string, nr_exclude = 0;
+	int i, n, prefixlen, nr_exclude = 0;
 
 	memset(pathspec, 0, sizeof(*pathspec));
 
@@ -549,7 +545,7 @@ void parse_pathspec(struct pathspec *pathspec,
 
 	if ((flags & PATHSPEC_PREFER_CWD) &&
 	    (flags & PATHSPEC_PREFER_FULL))
-		die("BUG: PATHSPEC_PREFER_CWD and PATHSPEC_PREFER_FULL are incompatible");
+		BUG("PATHSPEC_PREFER_CWD and PATHSPEC_PREFER_FULL are incompatible");
 
 	/* No arguments with prefix -> prefix pathspec */
 	if (!entry) {
@@ -557,7 +553,7 @@ void parse_pathspec(struct pathspec *pathspec,
 			return;
 
 		if (!(flags & PATHSPEC_PREFER_CWD))
-			die("BUG: PATHSPEC_PREFER_CWD requires arguments");
+			BUG("PATHSPEC_PREFER_CWD requires arguments");
 
 		pathspec->items = item = xcalloc(1, sizeof(*item));
 		item->match = xstrdup(prefix);
@@ -569,13 +565,10 @@ void parse_pathspec(struct pathspec *pathspec,
 	}
 
 	n = 0;
-	warn_empty_string = 1;
 	while (argv[n]) {
-		if (*argv[n] == '\0' && warn_empty_string) {
-			warning(_("empty strings as pathspecs will be made invalid in upcoming releases. "
-				  "please use . instead if you meant to match all paths"));
-			warn_empty_string = 0;
-		}
+		if (*argv[n] == '\0')
+			die("empty string is not a valid pathspec. "
+				  "please use . instead if you meant to match all paths");
 		n++;
 	}
 
@@ -616,7 +609,7 @@ void parse_pathspec(struct pathspec *pathspec,
 
 	if (pathspec->magic & PATHSPEC_MAXDEPTH) {
 		if (flags & PATHSPEC_KEEP_ORDER)
-			die("BUG: PATHSPEC_MAXDEPTH_VALID and PATHSPEC_KEEP_ORDER are incompatible");
+			BUG("PATHSPEC_MAXDEPTH_VALID and PATHSPEC_KEEP_ORDER are incompatible");
 		QSORT(pathspec->items, pathspec->nr, pathspec_item_cmp);
 	}
 }

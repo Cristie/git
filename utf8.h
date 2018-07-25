@@ -52,8 +52,13 @@ int mbs_chrlen(const char **text, size_t *remainder_p, const char *encoding);
  * The path should be NUL-terminated, but we will match variants of both ".git\0"
  * and ".git/..." (but _not_ ".../.git"). This makes it suitable for both fsck
  * and verify_path().
+ *
+ * Likewise, the is_hfs_dotgitfoo() variants look for ".gitfoo".
  */
 int is_hfs_dotgit(const char *path);
+int is_hfs_dotgitmodules(const char *path);
+int is_hfs_dotgitignore(const char *path);
+int is_hfs_dotgitattributes(const char *path);
 
 typedef enum {
 	ALIGN_LEFT,
@@ -69,5 +74,33 @@ typedef enum {
  */
 void strbuf_utf8_align(struct strbuf *buf, align_type position, unsigned int width,
 		       const char *s);
+
+/*
+ * If a data stream is declared as UTF-16BE or UTF-16LE, then a UTF-16
+ * BOM must not be used [1]. The same applies for the UTF-32 equivalents.
+ * The function returns true if this rule is violated.
+ *
+ * [1] http://unicode.org/faq/utf_bom.html#bom10
+ */
+int has_prohibited_utf_bom(const char *enc, const char *data, size_t len);
+
+/*
+ * If the endianness is not defined in the encoding name, then we
+ * require a BOM. The function returns true if a required BOM is missing.
+ *
+ * The Unicode standard instructs to assume big-endian if there in no
+ * BOM for UTF-16/32 [1][2]. However, the W3C/WHATWG encoding standard
+ * used in HTML5 recommends to assume little-endian to "deal with
+ * deployed content" [3].
+ *
+ * Therefore, strictly requiring a BOM seems to be the safest option for
+ * content in Git.
+ *
+ * [1] http://unicode.org/faq/utf_bom.html#gen6
+ * [2] http://www.unicode.org/versions/Unicode10.0.0/ch03.pdf
+ *     Section 3.10, D98, page 132
+ * [3] https://encoding.spec.whatwg.org/#utf-16le
+ */
+int is_missing_required_utf_bom(const char *enc, const char *data, size_t len);
 
 #endif

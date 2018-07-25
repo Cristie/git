@@ -14,8 +14,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __EWOK_RLW_H__
 #define __EWOK_RLW_H__
@@ -99,7 +98,6 @@ void rlwit_init(struct rlw_iterator *it, struct ewah_bitmap *bitmap);
 void rlwit_discard_first_words(struct rlw_iterator *it, size_t x);
 size_t rlwit_discharge(
 	struct rlw_iterator *it, struct ewah_bitmap *out, size_t max, int negate);
-void rlwit_discharge_empty(struct rlw_iterator *it, struct ewah_bitmap *out);
 
 static inline size_t rlwit_word_size(struct rlw_iterator *it)
 {

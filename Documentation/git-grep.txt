@@ -13,7 +13,7 @@ SYNOPSIS
 	   [-v | --invert-match] [-h|-H] [--full-name]
 	   [-E | --extended-regexp] [-G | --basic-regexp]
 	   [-P | --perl-regexp]
-	   [-F | --fixed-strings] [-n | --line-number]
+	   [-F | --fixed-strings] [-n | --line-number] [--column]
 	   [-l | --files-with-matches] [-L | --files-without-match]
 	   [(-O | --open-files-in-pager) [<pager>]]
 	   [-z | --null]
@@ -43,6 +43,9 @@ CONFIGURATION
 
 grep.lineNumber::
 	If set to true, enable `-n` option by default.
+
+grep.column::
+	If set to true, enable the `--column` option by default.
 
 grep.patternType::
 	Set the default matching behavior. Using a value of 'basic', 'extended',
@@ -169,6 +172,10 @@ providing this option will cause it to die.
 --line-number::
 	Prefix the line number to matching lines.
 
+--column::
+	Prefix the 1-indexed byte-offset of the first match from the start of the
+	matching line.
+
 -l::
 --files-with-matches::
 --name-only::
@@ -289,8 +296,11 @@ providing this option will cause it to die.
 <pathspec>...::
 	If given, limit the search to paths matching at least one pattern.
 	Both leading paths match and glob(7) patterns are supported.
++
+For more details about the <pathspec> syntax, see the 'pathspec' entry
+in linkgit:gitglossary[7].
 
-Examples
+EXAMPLES
 --------
 
 `git grep 'time_t' -- '*.[ch]'`::
@@ -304,6 +314,9 @@ Examples
 `git grep --all-match -e NODE -e Unexpected`::
 	Looks for a line that has `NODE` or `Unexpected` in
 	files that have lines that match both.
+
+`git grep solution -- :^Documentation`::
+	Looks for `solution`, excluding files in `Documentation`.
 
 GIT
 ---

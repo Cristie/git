@@ -140,8 +140,8 @@ test_expect_success setup '
 		echo "# User $GIT_AUTHOR_NAME <$GIT_AUTHOR_EMAIL>" &&
 		echo "# Date $test_tick 25200" &&
 		echo "#      $(git show --pretty="%aD" -s second)" &&
-		echo "# Node ID $_z40" &&
-		echo "# Parent  $_z40" &&
+		echo "# Node ID $ZERO_OID" &&
+		echo "# Parent  $ZERO_OID" &&
 		cat msg &&
 		echo &&
 		git diff-tree --no-commit-id -p second
@@ -662,6 +662,11 @@ test_expect_success 'am pauses on conflict' '
 	test -d .git/rebase-apply
 '
 
+test_expect_success 'am --show-current-patch' '
+	git am --show-current-patch >actual.patch &&
+	test_cmp .git/rebase-apply/0001 actual.patch
+'
+
 test_expect_success 'am --skip works' '
 	echo goodbye >expected &&
 	git am --skip &&
@@ -1043,6 +1048,18 @@ test_expect_success 'am works with multi-line in-body headers' '
 	# Ensure that the author and full message are present
 	git cat-file commit HEAD | grep "^author.*long@example.com" &&
 	git cat-file commit HEAD | grep "^$LONG$"
+'
+
+test_expect_success 'am --quit keeps HEAD where it is' '
+	mkdir .git/rebase-apply &&
+	>.git/rebase-apply/last &&
+	>.git/rebase-apply/next &&
+	git rev-parse HEAD^ >.git/ORIG_HEAD &&
+	git rev-parse HEAD >expected &&
+	git am --quit &&
+	test_path_is_missing .git/rebase-apply &&
+	git rev-parse HEAD >actual &&
+	test_cmp expected actual
 '
 
 test_done

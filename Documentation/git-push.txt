@@ -11,7 +11,7 @@ SYNOPSIS
 [verse]
 'git push' [--all | --mirror | --tags] [--follow-tags] [--atomic] [-n | --dry-run] [--receive-pack=<git-receive-pack>]
 	   [--repo=<repository>] [-f | --force] [-d | --delete] [--prune] [-v | --verbose]
-	   [-u | --set-upstream] [--push-option=<string>]
+	   [-u | --set-upstream] [-o <string> | --push-option=<string>]
 	   [--[no-]signed|--signed=(true|false|if-asked)]
 	   [--force-with-lease[=<refname>[:<expect>]]]
 	   [--no-verify] [<repository> [<refspec>...]]
@@ -123,6 +123,7 @@ already exists on the remote side.
 	will be tab-separated and sent to stdout instead of stderr.  The full
 	symbolic names of the refs will be given.
 
+-d::
 --delete::
 	All listed refs are deleted from the remote repository. This is
 	the same as prefixing all refs with a colon.
@@ -156,11 +157,17 @@ already exists on the remote side.
 	Either all refs are updated, or on error, no refs are updated.
 	If the server does not support atomic pushes the push will fail.
 
--o::
---push-option::
+-o <option>::
+--push-option=<option>::
 	Transmit the given string to the server, which passes them to
 	the pre-receive as well as the post-receive hook. The given string
 	must not contain a NUL or LF character.
+	When multiple `--push-option=<option>` are given, they are
+	all sent to the other side in the order listed on the
+	command line.
+	When no `--push-option=<option>` is given from the command
+	line, the values of configuration variable `push.pushOption`
+	are used instead.
 
 --receive-pack=<git-receive-pack>::
 --exec=<git-receive-pack>::
@@ -294,7 +301,7 @@ origin +master` to force a push to the `master` branch). See the
 	These options are passed to linkgit:git-send-pack[1]. A thin transfer
 	significantly reduces the amount of sent data when the sender and
 	receiver share many of the same objects in common. The default is
-	\--thin.
+	`--thin`.
 
 -q::
 --quiet::
@@ -417,7 +424,7 @@ reason::
 	refs, no explanation is needed. For a failed ref, the reason for
 	failure is described.
 
-Note about fast-forwards
+NOTE ABOUT FAST-FORWARDS
 ------------------------
 
 When an update changes a branch (or more in general, a ref) that used to
@@ -504,7 +511,7 @@ overwrite it. In other words, "git push --force" is a method reserved for
 a case where you do mean to lose history.
 
 
-Examples
+EXAMPLES
 --------
 
 `git push`::

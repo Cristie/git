@@ -578,15 +578,23 @@ static void threaded_lazy_init_name_hash(
 
 static void lazy_init_name_hash(struct index_state *istate)
 {
+	uint64_t start = getnanotime();
+
 	if (istate->name_hash_initialized)
 		return;
 	hashmap_init(&istate->name_hash, cache_entry_cmp, NULL, istate->cache_nr);
 	hashmap_init(&istate->dir_hash, dir_entry_cmp, NULL, istate->cache_nr);
 
 	if (lookup_lazy_params(istate)) {
-		hashmap_disallow_rehash(&istate->dir_hash, 1);
+		/*
+		 * Disable item counting and automatic rehashing because
+		 * we do per-chain (mod n) locking rather than whole hashmap
+		 * locking and we need to prevent the table-size from changing
+		 * and bucket items from being redistributed.
+		 */
+		hashmap_disable_item_counting(&istate->dir_hash);
 		threaded_lazy_init_name_hash(istate);
-		hashmap_disallow_rehash(&istate->dir_hash, 0);
+		hashmap_enable_item_counting(&istate->dir_hash);
 	} else {
 		int nr;
 		for (nr = 0; nr < istate->cache_nr; nr++)
@@ -594,6 +602,7 @@ static void lazy_init_name_hash(struct index_state *istate)
 	}
 
 	istate->name_hash_initialized = 1;
+	trace_performance_since(start, "initialize name hash");
 }
 
 /*
@@ -690,12 +699,12 @@ void adjust_dirname_case(struct index_state *istate, char *name)
 		if (*ptr == '/') {
 			struct dir_entry *dir;
 
-			ptr++;
-			dir = find_dir_entry(istate, name, ptr - name + 1);
+			dir = find_dir_entry(istate, name, ptr - name);
 			if (dir) {
 				memcpy((void *)startPtr, dir->name + (startPtr - name), ptr - startPtr);
-				startPtr = ptr;
+				startPtr = ptr + 1;
 			}
+			ptr++;
 		}
 	}
 }

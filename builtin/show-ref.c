@@ -1,6 +1,7 @@
 #include "builtin.h"
 #include "cache.h"
 #include "refs.h"
+#include "object-store.h"
 #include "object.h"
 #include "tag.h"
 #include "string-list.h"
@@ -29,7 +30,7 @@ static void show_one(const char *refname, const struct object_id *oid)
 	if (quiet)
 		return;
 
-	hex = find_unique_abbrev(oid->hash, abbrev);
+	hex = find_unique_abbrev(oid, abbrev);
 	if (hash_only)
 		printf("%s\n", hex);
 	else
@@ -38,8 +39,8 @@ static void show_one(const char *refname, const struct object_id *oid)
 	if (!deref_tags)
 		return;
 
-	if (!peel_ref(refname, peeled.hash)) {
-		hex = find_unique_abbrev(peeled.hash, abbrev);
+	if (!peel_ref(refname, &peeled)) {
+		hex = find_unique_abbrev(&peeled, abbrev);
 		printf("%s %s^{}\n", hex, refname);
 	}
 }
@@ -197,7 +198,7 @@ int cmd_show_ref(int argc, const char **argv, const char *prefix)
 			struct object_id oid;
 
 			if ((starts_with(*pattern, "refs/") || !strcmp(*pattern, "HEAD")) &&
-			    !read_ref(*pattern, oid.hash)) {
+			    !read_ref(*pattern, &oid)) {
 				show_one(*pattern, &oid);
 			}
 			else if (!quiet)

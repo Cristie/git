@@ -41,11 +41,13 @@ in the section header, like in the example below:
 --------
 
 Subsection names are case sensitive and can contain any characters except
-newline (doublequote `"` and backslash can be included by escaping them
-as `\"` and `\\`, respectively).  Section headers cannot span multiple
-lines.  Variables may belong directly to a section or to a given subsection.
-You can have `[section]` if you have `[section "subsection"]`, but you
-don't need to.
+newline and the null byte. Doublequote `"` and backslash can be included
+by escaping them as `\"` and `\\`, respectively. Backslashes preceding
+other characters are dropped when reading; for example, `\t` is read as
+`t` and `\0` is read as `0` Section headers cannot span multiple lines.
+Variables may belong directly to a section or to a given subsection. You
+can have `[section]` if you have `[section "subsection"]`, but you don't
+need to.
 
 There is also a deprecated `[section.subsection]` syntax. With this
 syntax, the subsection name is converted to lower-case and is also
@@ -351,6 +353,12 @@ advice.*::
 	addEmbeddedRepo::
 		Advice on what to do when you've accidentally added one
 		git repo inside of another.
+	ignoredHook::
+		Advice shown if a hook is ignored because the hook is not
+		set as executable.
+	waitingForEditor::
+		Print a message to the terminal whenever Git is waiting for
+		editor input from the user.
 --
 
 core.fileMode::
@@ -382,16 +390,19 @@ core.hideDotFiles::
 	default mode is 'dotGitOnly'.
 
 core.ignoreCase::
-	If true, this option enables various workarounds to enable
+	Internal variable which enables various workarounds to enable
 	Git to work better on filesystems that are not case sensitive,
-	like FAT. For example, if a directory listing finds
-	"makefile" when Git expects "Makefile", Git will assume
+	like APFS, HFS+, FAT, NTFS, etc. For example, if a directory listing
+	finds "makefile" when Git expects "Makefile", Git will assume
 	it is really the same file, and continue to remember it as
 	"Makefile".
 +
 The default is false, except linkgit:git-clone[1] or linkgit:git-init[1]
 will probe and set core.ignoreCase true if appropriate when the repository
 is created.
++
+Git relies on the proper configuration of this variable for your operating
+and file system. Modifying this value may result in unexpected behavior.
 
 core.precomposeUnicode::
 	This option is only used by Mac OS implementation of Git.
@@ -412,6 +423,13 @@ core.protectNTFS::
 	cause problems with the NTFS filesystem, e.g. conflict with
 	8.3 "short" names.
 	Defaults to `true` on Windows, and `false` elsewhere.
+
+core.fsmonitor::
+	If set, the value of this variable is used as a command which
+	will identify all files that may have changed since the
+	requested date/time. This information is used to speed up git by
+	avoiding unnecessary processing of files that have not changed.
+	See the "fsmonitor-watchman" section of linkgit:githooks[5].
 
 core.trustctime::
 	If false, the ctime differences between the index and the
@@ -514,6 +532,12 @@ core.autocrlf::
 	working directory and the repository has LF line endings.
 	This variable can be set to 'input',
 	in which case no output conversion is performed.
+
+core.checkRoundtripEncoding::
+	A comma and/or whitespace separated list of encodings that Git
+	performs UTF-8 round trip checks on if they are used in an
+	`working-tree-encoding` attribute (see linkgit:gitattributes[5]).
+	The default value is `SHIFT-JIS`.
 
 core.symlinks::
 	If false, symbolic links are checked out as small plain files that
@@ -883,6 +907,10 @@ core.notesRef::
 This setting defaults to "refs/notes/commits", and it can be overridden by
 the `GIT_NOTES_REF` environment variable.  See linkgit:git-notes[1].
 
+core.commitGraph::
+	Enable git commit graph feature. Allows reading from the
+	commit-graph file.
+
 core.sparseCheckout::
 	Enable "sparse checkout" feature. See section "Sparse checkout" in
 	linkgit:git-read-tree[1] for more information.
@@ -948,6 +976,23 @@ apply.ignoreWhitespace::
 apply.whitespace::
 	Tells 'git apply' how to handle whitespaces, in the same way
 	as the `--whitespace` option. See linkgit:git-apply[1].
+
+blame.showRoot::
+	Do not treat root commits as boundaries in linkgit:git-blame[1].
+	This option defaults to false.
+
+blame.blankBoundary::
+	Show blank commit object name for boundary commits in
+	linkgit:git-blame[1]. This option defaults to false.
+
+blame.showEmail::
+	Show the author email instead of author name in linkgit:git-blame[1].
+	This option defaults to false.
+
+blame.date::
+	Specifies the format used to output dates in linkgit:git-blame[1].
+	If unset the iso format is used. For supported values,
+	see the discussion of the `--date` option at linkgit:git-log[1].
 
 branch.autoSetupMerge::
 	Tells 'git branch' and 'git checkout' to set up new branches
@@ -1026,6 +1071,10 @@ branch.<name>.rebase::
 	"git pull" is run. See "pull.rebase" for doing this in a non
 	branch-specific manner.
 +
+When `merges`, pass the `--rebase-merges` option to 'git rebase'
+so that the local merge commits are included in the rebase (see
+linkgit:git-rebase[1] for details).
++
 When preserve, also pass `--preserve-merges` along to 'git rebase'
 so that locally committed merge commits will not be flattened
 by running 'git pull'.
@@ -1055,6 +1104,16 @@ browser.<tool>.path::
 clean.requireForce::
 	A boolean to make git-clean do nothing unless given -f,
 	-i or -n.   Defaults to true.
+
+color.advice::
+	A boolean to enable/disable color in hints (e.g. when a push
+	failed, see `advice.*` for a list).  May be set to `always`,
+	`false` (or `never`) or `auto` (or `true`), in which case colors
+	are used only when the error output goes to a terminal. If
+	unset, then the value of `color.ui` is used (`auto` by default).
+
+color.advice.hint::
+	Use customized color for hints.
 
 color.branch::
 	A boolean to enable/disable color in the output of
@@ -1106,7 +1165,8 @@ color.diff.<slot>::
 color.decorate.<slot>::
 	Use customized color for 'git log --decorate' output.  `<slot>` is one
 	of `branch`, `remoteBranch`, `tag`, `stash` or `HEAD` for local
-	branches, remote-tracking branches, tags, stash and HEAD, respectively.
+	branches, remote-tracking branches, tags, stash and HEAD, respectively
+	and `grafted` for grafted commits.
 
 color.grep::
 	When set to `always`, always highlight matches.  When `false` (or
@@ -1125,8 +1185,10 @@ color.grep.<slot>::
 	filename prefix (when not using `-h`)
 `function`;;
 	function name lines (when using `-p`)
-`linenumber`;;
+`lineNumber`;;
 	line number prefix (when using `-n`)
+`column`;;
+	column number prefix (when using `--column`)
 `match`;;
 	matching text (same as setting `matchContext` and `matchSelected`)
 `matchContext`;;
@@ -1158,6 +1220,15 @@ color.pager::
 	A boolean to enable/disable colored output when the pager is in
 	use (default is true).
 
+color.push::
+	A boolean to enable/disable color in push errors. May be set to
+	`always`, `false` (or `never`) or `auto` (or `true`), in which
+	case colors are used only when the error output goes to a terminal.
+	If unset, then the value of `color.ui` is used (`auto` by default).
+
+color.push.error::
+	Use customized color for push errors.
+
 color.showBranch::
 	A boolean to enable/disable color in the output of
 	linkgit:git-show-branch[1]. May be set to `always`,
@@ -1185,6 +1256,42 @@ color.status.<slot>::
 	respectively, when branch and tracking information is displayed in the
 	status short-format), or
 	`unmerged` (files which have unmerged changes).
+
+color.blame.repeatedLines::
+	Use the customized color for the part of git-blame output that
+	is repeated meta information per line (such as commit id,
+	author name, date and timezone). Defaults to cyan.
+
+color.blame.highlightRecent::
+	This can be used to color the metadata of a blame line depending
+	on age of the line.
++
+This setting should be set to a comma-separated list of color and date settings,
+starting and ending with a color, the dates should be set from oldest to newest.
+The metadata will be colored given the colors if the the line was introduced
+before the given timestamp, overwriting older timestamped colors.
++
+Instead of an absolute timestamp relative timestamps work as well, e.g.
+2.weeks.ago is valid to address anything older than 2 weeks.
++
+It defaults to 'blue,12 month ago,white,1 month ago,red', which colors
+everything older than one year blue, recent changes between one month and
+one year old are kept white, and lines introduced within the last month are
+colored red.
+
+blame.coloring::
+	This determines the coloring scheme to be applied to blame
+	output. It can be 'repeatedLines', 'highlightRecent',
+	or 'none' which is the default.
+
+color.transport::
+	A boolean to enable/disable color when pushes are rejected. May be
+	set to `always`, `false` (or `never`) or `auto` (or `true`), in which
+	case colors are used only when the error output goes to a terminal.
+	If unset, then the value of `color.ui` is used (`auto` by default).
+
+color.transport.rejected::
+	Use customized color when a push was rejected.
 
 color.ui::
 	This variable determines the default value for variables such
@@ -1311,6 +1418,14 @@ credential.<url>.*::
 credentialCache.ignoreSIGHUP::
 	Tell git-credential-cache--daemon to ignore SIGHUP, instead of quitting.
 
+completion.commands::
+	This is only used by git-completion.bash to add or remove
+	commands from the list of completed commands. Normally only
+	porcelain commands and a few select others are completed. You
+	can add more commands, separated by space, in this
+	variable. Prefixing the command with '-' will remove it from
+	the existing list.
+
 include::diff-config.txt[]
 
 difftool.<tool>.path::
@@ -1366,7 +1481,16 @@ fetch.unpackLimit::
 
 fetch.prune::
 	If true, fetch will automatically behave as if the `--prune`
-	option was given on the command line.  See also `remote.<name>.prune`.
+	option was given on the command line.  See also `remote.<name>.prune`
+	and the PRUNING section of linkgit:git-fetch[1].
+
+fetch.pruneTags::
+	If true, fetch will automatically behave as if the
+	`refs/tags/*:refs/tags/*` refspec was provided when pruning,
+	if not set already. This allows for setting both this option
+	and `fetch.prune` to maintain a 1=1 mapping to upstream
+	refs. See also `remote.<name>.pruneTags` and the PRUNING
+	section of linkgit:git-fetch[1].
 
 fetch.output::
 	Control how ref update status is printed. Valid values are
@@ -1517,6 +1641,18 @@ gc.autoDetach::
 	Make `git gc --auto` return immediately and run in background
 	if the system supports it. Default is true.
 
+gc.bigPackThreshold::
+	If non-zero, all packs larger than this limit are kept when
+	`git gc` is run. This is very similar to `--keep-base-pack`
+	except that all packs that meet the threshold are kept, not
+	just the base pack. Defaults to zero. Common unit suffixes of
+	'k', 'm', or 'g' are supported.
++
+Note that if the number of kept packs is more than gc.autoPackLimit,
+this configuration variable is ignored, all packs except the base pack
+will be repacked. After this the number of packs should go below
+gc.autoPackLimit and gc.bigPackThreshold should be respected again.
+
 gc.logExpiry::
 	If the file gc.log exists, then `git gc --auto` won't run
 	unless that file is more than 'gc.logExpiry' old.  Default is
@@ -1666,6 +1802,9 @@ gitweb.snapshot::
 
 grep.lineNumber::
 	If set to true, enable `-n` option by default.
+
+grep.column::
+	If set to true, enable the `--column` option by default.
 
 grep.patternType::
 	Set the default matching behavior. Using a value of 'basic', 'extended',
@@ -1916,6 +2055,7 @@ http.sslVersion::
 	- tlsv1.0
 	- tlsv1.1
 	- tlsv1.2
+	- tlsv1.3
 
 +
 Can be overridden by the `GIT_SSL_VERSION` environment variable.
@@ -1938,8 +2078,8 @@ empty string.
 
 http.sslVerify::
 	Whether to verify the SSL certificate when fetching or pushing
-	over HTTPS. Can be overridden by the `GIT_SSL_NO_VERIFY` environment
-	variable.
+	over HTTPS. Defaults to true. Can be overridden by the
+	`GIT_SSL_NO_VERIFY` environment variable.
 
 http.sslCert::
 	File containing the SSL certificate when fetching or pushing
@@ -2081,15 +2221,40 @@ matched against are those given directly to Git commands.  This means any URLs
 visited as a result of a redirection do not participate in matching.
 
 ssh.variant::
-	Depending on the value of the environment variables `GIT_SSH` or
-	`GIT_SSH_COMMAND`, or the config setting `core.sshCommand`, Git
-	auto-detects whether to adjust its command-line parameters for use
-	with plink or tortoiseplink, as opposed to the default (OpenSSH).
+	By default, Git determines the command line arguments to use
+	based on the basename of the configured SSH command (configured
+	using the environment variable `GIT_SSH` or `GIT_SSH_COMMAND` or
+	the config setting `core.sshCommand`). If the basename is
+	unrecognized, Git will attempt to detect support of OpenSSH
+	options by first invoking the configured SSH command with the
+	`-G` (print configuration) option and will subsequently use
+	OpenSSH options (if that is successful) or no options besides
+	the host and remote command (if it fails).
 +
-The config variable `ssh.variant` can be set to override this auto-detection;
-valid values are `ssh`, `plink`, `putty` or `tortoiseplink`. Any other value
-will be treated as normal ssh. This setting can be overridden via the
-environment variable `GIT_SSH_VARIANT`.
+The config variable `ssh.variant` can be set to override this detection.
+Valid values are `ssh` (to use OpenSSH options), `plink`, `putty`,
+`tortoiseplink`, `simple` (no options except the host and remote command).
+The default auto-detection can be explicitly requested using the value
+`auto`.  Any other value is treated as `ssh`.  This setting can also be
+overridden via the environment variable `GIT_SSH_VARIANT`.
++
+The current command-line parameters used for each variant are as
+follows:
++
+--
+
+* `ssh` - [-p port] [-4] [-6] [-o option] [username@]host command
+
+* `simple` - [username@]host command
+
+* `plink` or `putty` - [-P port] [-4] [-6] [username@]host command
+
+* `tortoiseplink` - [-P port] [-4] [-6] -batch [username@]host command
+
+--
++
+Except for the `simple` variant, command-line parameters are likely to
+change as git gains new features.
 
 i18n.commitEncoding::
 	Character encoding the commit messages are stored in; Git itself
@@ -2355,6 +2520,7 @@ pack.window::
 pack.depth::
 	The maximum delta depth used by linkgit:git-pack-objects[1] when no
 	maximum depth is given on the command line. Defaults to 50.
+	Maximum value is 4095.
 
 pack.windowMemory::
 	The maximum size of memory that is consumed by each thread
@@ -2391,7 +2557,8 @@ pack.deltaCacheLimit::
 	The maximum size of a delta, that is cached in
 	linkgit:git-pack-objects[1]. This cache is used to speed up the
 	writing object phase by not having to recompute the final delta
-	result once the best match for all objects is found. Defaults to 1000.
+	result once the best match for all objects is found.
+	Defaults to 1000. Maximum value is 65535.
 
 pack.threads::
 	Specifies the number of threads to spawn when searching for best
@@ -2517,6 +2684,23 @@ The protocol names currently used by git are:
     `hg` to allow the `git-remote-hg` helper)
 --
 
+protocol.version::
+	Experimental. If set, clients will attempt to communicate with a
+	server using the specified protocol version.  If unset, no
+	attempt will be made by the client to communicate using a
+	particular protocol version, this results in protocol version 0
+	being used.
+	Supported versions:
++
+--
+
+* `0` - the original wire protocol.
+
+* `1` - the original wire protocol with the addition of a version string
+  in the initial response from the server.
+
+--
+
 pull.ff::
 	By default, Git does not create an extra merge commit when merging
 	a commit that is a descendant of the current commit. Instead, the
@@ -2532,6 +2716,10 @@ pull.rebase::
 	of merging the default branch from the default remote when "git
 	pull" is run. See "branch.<name>.rebase" for setting this on a
 	per-branch basis.
++
+When `merges`, pass the `--rebase-merges` option to 'git rebase'
+so that the local merge commits are included in the rebase (see
+linkgit:git-rebase[1] for details).
 +
 When preserve, also pass `--preserve-merges` along to 'git rebase'
 so that locally committed merge commits will not be flattened
@@ -2621,6 +2809,35 @@ push.gpgSign::
 	override a value from a lower-priority config file. An explicit
 	command-line flag always overrides this config option.
 
+push.pushOption::
+	When no `--push-option=<option>` argument is given from the
+	command line, `git push` behaves as if each <value> of
+	this variable is given as `--push-option=<value>`.
++
+This is a multi-valued variable, and an empty value can be used in a
+higher priority configuration file (e.g. `.git/config` in a
+repository) to clear the values inherited from a lower priority
+configuration files (e.g. `$HOME/.gitconfig`).
++
+--
+
+Example:
+
+/etc/gitconfig
+  push.pushoption = a
+  push.pushoption = b
+
+~/.gitconfig
+  push.pushoption = c
+
+repo/.git/config
+  push.pushoption =
+  push.pushoption = b
+
+This will result in only b (a and c are cleared).
+
+--
+
 push.recurseSubmodules::
 	Make sure all submodule commits used by the revisions to be pushed
 	are available on a remote-tracking branch. If the value is 'check'
@@ -2635,36 +2852,7 @@ push.recurseSubmodules::
 	is retained. You may override this configuration at time of push by
 	specifying '--recurse-submodules=check|on-demand|no'.
 
-rebase.stat::
-	Whether to show a diffstat of what changed upstream since the last
-	rebase. False by default.
-
-rebase.autoSquash::
-	If set to true enable `--autosquash` option by default.
-
-rebase.autoStash::
-	When set to true, automatically create a temporary stash entry
-	before the operation begins, and apply it after the operation
-	ends.  This means that you can run rebase on a dirty worktree.
-	However, use with care: the final stash application after a
-	successful rebase might result in non-trivial conflicts.
-	Defaults to false.
-
-rebase.missingCommitsCheck::
-	If set to "warn", git rebase -i will print a warning if some
-	commits are removed (e.g. a line was deleted), however the
-	rebase will still proceed. If set to "error", it will print
-	the previous warning and stop the rebase, 'git rebase
-	--edit-todo' can then be used to correct the error. If set to
-	"ignore", no checking is done.
-	To drop a commit without warning or error, use the `drop`
-	command in the todo-list.
-	Defaults to "ignore".
-
-rebase.instructionFormat::
-	A format string, as specified in linkgit:git-log[1], to be used for
-	the instruction list during an interactive rebase.  The format will automatically
-	have the long commit hash prepended to the format.
+include::rebase-config.txt[]
 
 receive.advertiseAtomic::
 	By default, git-receive-pack will advertise the atomic push
@@ -2871,6 +3059,15 @@ remote.<name>.prune::
 	remote (as if the `--prune` option was given on the command line).
 	Overrides `fetch.prune` settings, if any.
 
+remote.<name>.pruneTags::
+	When set to true, fetching from this remote by default will also
+	remove any local tags that no longer exist on the remote if pruning
+	is activated in general via `remote.<name>.prune`, `fetch.prune` or
+	`--prune`. Overrides `fetch.pruneTags` settings, if any.
++
+See also `remote.<name>.prune` and the PRUNING section of
+linkgit:git-fetch[1].
+
 remotes.<group>::
 	The list of remotes which are fetched by "git remote update
 	<group>".  See linkgit:git-remote[1].
@@ -2951,6 +3148,7 @@ sendemail.smtpPass::
 sendemail.suppresscc::
 sendemail.suppressFrom::
 sendemail.to::
+sendemail.tocmd::
 sendemail.smtpDomain::
 sendemail.smtpServer::
 sendemail.smtpServerPort::
@@ -3025,6 +3223,18 @@ status.displayCommentPrefix::
 	behavior of linkgit:git-status[1] in Git 1.8.4 and previous.
 	Defaults to false.
 
+status.renameLimit::
+	The number of files to consider when performing rename detection
+	in linkgit:git-status[1] and linkgit:git-commit[1]. Defaults to
+	the value of diff.renameLimit.
+
+status.renames::
+	Whether and how Git detects renames in linkgit:git-status[1] and
+	linkgit:git-commit[1] .  If set to "false", rename detection is
+	disabled. If set to "true", basic rename detection is enabled.
+	If set to "copies" or "copy", Git will detect copies, as well.
+	Defaults to the value of diff.renames.
+
 status.showStash::
 	If set to true, linkgit:git-status[1] will display the number of
 	entries currently stashed away.
@@ -3085,10 +3295,14 @@ submodule.<name>.url::
 	See linkgit:git-submodule[1] and linkgit:gitmodules[5] for details.
 
 submodule.<name>.update::
-	The default update procedure for a submodule. This variable
-	is populated by `git submodule init` from the
-	linkgit:gitmodules[5] file. See description of 'update'
-	command in linkgit:git-submodule[1].
+	The method by which a submodule is updated by 'git submodule update',
+	which is the only affected command, others such as
+	'git checkout --recurse-submodules' are unaffected. It exists for
+	historical reasons, when 'git submodule' was the only command to
+	interact with submodules; settings like `submodule.active`
+	and `pull.rebase` are more specific. It is populated by
+	`git submodule init` from the linkgit:gitmodules[5] file.
+	See description of 'update' command in linkgit:git-submodule[1].
 
 submodule.<name>.branch::
 	The remote branch name for a submodule, used by `git submodule
@@ -3122,16 +3336,18 @@ submodule.<name>.ignore::
 submodule.<name>.active::
 	Boolean value indicating if the submodule is of interest to git
 	commands.  This config option takes precedence over the
-	submodule.active config option.
+	submodule.active config option. See linkgit:gitsubmodules[7] for
+	details.
 
 submodule.active::
 	A repeated field which contains a pathspec used to match against a
 	submodule's path to determine if the submodule is of interest to git
-	commands.
+	commands. See linkgit:gitsubmodules[7] for details.
 
 submodule.recurse::
 	Specifies if commands recurse into submodules by default. This
-	applies to all commands that have a `--recurse-submodules` option.
+	applies to all commands that have a `--recurse-submodules` option,
+	except `clone`.
 	Defaults to false.
 
 submodule.fetchJobs::
@@ -3264,10 +3480,21 @@ uploadpack.packObjectsHook::
 	was run. I.e., `upload-pack` will feed input intended for
 	`pack-objects` to the hook, and expects a completed packfile on
 	stdout.
+
+uploadpack.allowFilter::
+	If this option is set, `upload-pack` will support partial
+	clone and partial fetch object filtering.
 +
 Note that this configuration variable is ignored if it is seen in the
 repository-level config (this is a safety measure against fetching from
 untrusted repositories).
+
+uploadpack.allowRefInWant::
+	If this option is set, `upload-pack` will support the `ref-in-want`
+	feature of the protocol version 2 `fetch` command.  This feature
+	is intended for the benefit of load-balanced servers which may
+	not have the same view of what OIDs their refs point to due to
+	replication delay.
 
 url.<base>.insteadOf::
 	Any URL that starts with this value will be rewritten to
@@ -3365,3 +3592,13 @@ web.browser::
 	Specify a web browser that may be used by some commands.
 	Currently only linkgit:git-instaweb[1] and linkgit:git-help[1]
 	may use it.
+
+worktree.guessRemote::
+	With `add`, if no branch argument, and neither of `-b` nor
+	`-B` nor `--detach` are given, the command defaults to
+	creating a new branch from HEAD.  If `worktree.guessRemote` is
+	set to true, `worktree add` tries to find a remote-tracking
+	branch whose name uniquely matches the new branch name.  If
+	such a branch exists, it is checked out and set as "upstream"
+	for the new branch.  If no such match can be found, it falls
+	back to creating a new branch from the current HEAD.

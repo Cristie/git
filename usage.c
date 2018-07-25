@@ -148,6 +148,7 @@ static const char *fmt_with_err(char *buf, int n, const char *fmt)
 		}
 	}
 	str_error[j] = 0;
+	/* Truncation is acceptable here */
 	snprintf(buf, n, "%s: %s", fmt, str_error);
 	return buf;
 }
@@ -210,6 +211,9 @@ void warning(const char *warn, ...)
 	va_end(params);
 }
 
+/* Only set this, ever, from t/helper/, when verifying that bugs are caught. */
+int BUG_exit_code;
+
 static NORETURN void BUG_vfl(const char *file, int line, const char *fmt, va_list params)
 {
 	char prefix[256];
@@ -221,6 +225,8 @@ static NORETURN void BUG_vfl(const char *file, int line, const char *fmt, va_lis
 		snprintf(prefix, sizeof(prefix), "BUG: ");
 
 	vreportf(prefix, fmt, params);
+	if (BUG_exit_code)
+		exit(BUG_exit_code);
 	abort();
 }
 
@@ -239,5 +245,20 @@ NORETURN void BUG(const char *fmt, ...)
 	va_start(ap, fmt);
 	BUG_vfl(NULL, 0, fmt, ap);
 	va_end(ap);
+}
+#endif
+
+#ifdef SUPPRESS_ANNOTATED_LEAKS
+void unleak_memory(const void *ptr, size_t len)
+{
+	static struct suppressed_leak_root {
+		struct suppressed_leak_root *next;
+		char data[FLEX_ARRAY];
+	} *suppressed_leaks;
+	struct suppressed_leak_root *root;
+
+	FLEX_ALLOC_MEM(root, data, ptr, len);
+	root->next = suppressed_leaks;
+	suppressed_leaks = root;
 }
 #endif

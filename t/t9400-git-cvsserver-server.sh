@@ -447,12 +447,10 @@ test_expect_success 'cvs update (-p)' '
     git push gitcvs.git >/dev/null &&
     cd cvswork &&
     GIT_CONFIG="$git_config" cvs update &&
-    rm -f failures &&
     for i in merge no-lf empty really-empty; do
-        GIT_CONFIG="$git_config" cvs update -p "$i" >$i.out
-	test_cmp $i.out ../$i >>failures 2>&1
-    done &&
-    test -z "$(cat failures)"
+	GIT_CONFIG="$git_config" cvs update -p "$i" >$i.out &&
+	test_cmp $i.out ../$i || return 1
+    done
 '
 
 cd "$WORKDIR"
@@ -586,6 +584,54 @@ test_expect_success 'cvs annotate' '
     sed -e "s/ .*//" ../out >../actual &&
     for i in 3 1 1 1 1 1 1 1 2 4; do echo 1.$i; done >../expect &&
     test_cmp ../expect ../actual
+'
+
+#------------
+# running via git-shell
+#------------
+
+cd "$WORKDIR"
+
+test_expect_success 'create remote-cvs helper' '
+	write_script remote-cvs <<-\EOF
+	exec git shell -c "cvs server"
+	EOF
+'
+
+test_expect_success 'cvs server does not run with vanilla git-shell' '
+	(
+		cd cvswork &&
+		CVS_SERVER=$WORKDIR/remote-cvs &&
+		export CVS_SERVER &&
+		test_must_fail cvs log merge
+	)
+'
+
+test_expect_success 'configure git shell to run cvs server' '
+	mkdir "$HOME"/git-shell-commands &&
+
+	write_script "$HOME"/git-shell-commands/cvs <<-\EOF &&
+	if ! test $# = 1 && test "$1" = "server"
+	then
+		echo >&2 "git-cvsserver only handles \"server\""
+		exit 1
+	fi
+	exec git cvsserver server
+	EOF
+
+	# Should not be used, but part of the recommended setup
+	write_script "$HOME"/git-shell-commands/no-interactive-login <<-\EOF
+	echo Interactive login forbidden
+	EOF
+'
+
+test_expect_success 'cvs server can run with recommended config' '
+	(
+		cd cvswork &&
+		CVS_SERVER=$WORKDIR/remote-cvs &&
+		export CVS_SERVER &&
+		cvs log merge
+	)
 '
 
 test_done
